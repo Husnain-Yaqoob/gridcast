@@ -1,0 +1,30 @@
+# The database is derived data — it is rebuilt by running the pipeline, and
+# it grows without limit. Committing it would put megabytes of duplicated
+# public data into the history permanently.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
