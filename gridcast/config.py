@@ -61,21 +61,53 @@ REGIONS: tuple[str, ...] = ("ROI", "NI", "ALL")
 DEFAULT_REGION = "ALL"
 
 # --- politeness -----------------------------------------------------------
-# Seconds to wait between consecutive requests. The dashboard publishes at
-# 15-minute resolution, so there is nothing to gain from going faster.
-REQUEST_INTERVAL_SECONDS = 1.5
+#
+# These numbers are not guesses. The first full backfill was throttled: the
+# service served roughly fifteen requests, then returned 403 for the rest, and
+# each subsequent series got fewer successes than the one before it — the
+# signature of a token bucket draining faster than it refills.
+#
+# Two things were wrong. Asking for a year in weekly slices meant 53 requests
+# per series and 318 in total, which is a lot of asking however politely each
+# one is phrased. And 1.5 seconds apart was too fast regardless.
 
-# A single request covering too long a window makes the service work hard and
-# returns a response we then have to hold in memory. Backfill is chunked.
-MAX_DAYS_PER_REQUEST = 7
+# Four weeks per request rather than one. A month of quarter-hourly data is
+# about 2,900 rows — a comfortable response — and it cuts the whole backfill
+# from 318 requests to 84. Fewer, moderate requests is easier on the service
+# than many small ones, and it is the change that matters most.
+MAX_DAYS_PER_REQUEST = 28
 
-REQUEST_TIMEOUT_SECONDS = 30
+# Seconds between consecutive requests. The dashboard publishes every fifteen
+# minutes; there has never been anything to gain from going faster.
+REQUEST_INTERVAL_SECONDS = 5.0
 
-# Retry policy. The service returned a 503 during development, so transient
-# failure is the expected case rather than the exceptional one.
+REQUEST_TIMEOUT_SECONDS = 45
+
+# Transient server-side failures. Worth retrying quickly.
 MAX_RETRIES = 4
 BACKOFF_BASE_SECONDS = 2.0
-RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+RETRY_STATUS_CODES = frozenset({500, 502, 503, 504})
+
+# Throttling, which is a different thing and needs a different answer.
+#
+# 403 here does not mean "you may never have this" — the same request succeeds
+# fine a minute later. It means "you have asked too often". Retrying it on a
+# two-second backoff is useless and rude; the client waits properly instead.
+THROTTLE_STATUS_CODES = frozenset({403, 429})
+THROTTLE_COOLDOWN_SECONDS = 90.0
+
+# Total cool-downs allowed across a whole run, not per request.
+#
+# Per-request was the first version and it was badly wrong: 84 requests each
+# permitted three escalating waits meant a persistently throttled backfill
+# could sit there for hours, apparently frozen. Once the service has said "too
+# often" this many times, the honest conclusion is that today's allowance is
+# spent — stop, keep what was fetched, and come back later.
+MAX_THROTTLE_WAITS = 4
+
+# A long sleep that prints nothing is indistinguishable from a hang. Waits are
+# broken into slices so the client can say how much longer it intends to wait.
+COOLDOWN_TICK_SECONDS = 15.0
 
 USER_AGENT = (
     "gridcast/0.1 (portfolio project; contact via github.com/Husnain-Yaqoob)"

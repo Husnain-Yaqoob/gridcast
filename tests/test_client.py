@@ -12,7 +12,8 @@ from datetime import date
 import pytest
 import requests
 
-from gridcast.client import GridClient, GridClientError
+from gridcast.client import GridClient, GridClientError, ThrottledOut
+from gridcast.config import COOLDOWN_TICK_SECONDS
 
 
 class FakeResponse:
@@ -142,23 +143,90 @@ def test_long_range_is_split_into_bounded_requests():
     client, _ = make_client([
         FakeResponse(payload={"Status": "Success", "Rows": []}) for _ in range(10)
     ])
-    list(client.fetch_range("wind", "ALL", date(2026, 1, 1), date(2026, 1, 21)))
-    # 21 days at 7 days per request
-    assert len(client.session.calls) == 3
+    list(client.fetch_range("wind", "ALL", date(2026, 1, 1), date(2026, 3, 31)))
+    # 90 days at 28 days per request
+    assert len(client.session.calls) == 4
 
 
 def test_chunks_do_not_overlap_or_leave_gaps():
     client, _ = make_client([
         FakeResponse(payload={"Status": "Success", "Rows": []}) for _ in range(10)
     ])
-    list(client.fetch_range("wind", "ALL", date(2026, 1, 1), date(2026, 1, 21)))
+    list(client.fetch_range("wind", "ALL", date(2026, 1, 1), date(2026, 3, 31)))
 
     starts = [c["datefrom"] for c in client.session.calls]
     ends = [c["dateto"] for c in client.session.calls]
     assert starts[0] == "01-Jan-2026 00:00"
-    assert ends[0] == "07-Jan-2026 23:59"
-    assert starts[1] == "08-Jan-2026 00:00"     # day after, no overlap, no gap
-    assert ends[-1] == "21-Jan-2026 23:59"
+    assert ends[0] == "28-Jan-2026 23:59"
+    assert starts[1] == "29-Jan-2026 00:00"     # day after, no overlap, no gap
+    assert ends[-1] == "31-Mar-2026 23:59"
+
+
+def test_windows_covers_the_range_without_gaps():
+    """windows() is pure — the ingest layer uses it to decide what to skip."""
+    windows = list(GridClient.windows(date(2026, 1, 1), date(2026, 3, 31)))
+    assert windows[0][0] == date(2026, 1, 1)
+    assert windows[-1][1] == date(2026, 3, 31)
+    for (_, prev_end), (next_start, _) in zip(windows, windows[1:]):
+        assert (next_start - prev_end).days == 1
+
+
+# ------------------------------------------------------------------ throttling
+def test_throttle_waits_and_then_succeeds():
+    """403 here means 'too often', not 'never'. It must be waited out."""
+    client, slept = make_client([
+        FakeResponse(status_code=403),
+        FakeResponse(payload={"Status": "Success", "Rows": [ROW]}),
+    ])
+    readings = client.fetch("wind", "ALL", date(2026, 1, 15), date(2026, 1, 15))
+    assert len(readings) == 1
+    assert sum(slept) >= 60, "a throttle cool-down should be a real wait"
+
+
+def test_cooldown_is_sliced_so_it_can_report_progress():
+    """A silent two-minute sleep is indistinguishable from a hang."""
+    client, slept = make_client([
+        FakeResponse(status_code=403),
+        FakeResponse(payload={"Status": "Success", "Rows": []}),
+    ])
+    client.fetch("wind", "ALL", date(2026, 1, 15), date(2026, 1, 15))
+    assert all(s <= COOLDOWN_TICK_SECONDS for s in slept), \
+        "no single sleep should be longer than one tick"
+    assert len([s for s in slept if s > 0]) >= 4
+
+
+def test_throttle_budget_is_spent_across_requests_not_per_request():
+    """Per-request budgets let a throttled run grind on for hours."""
+    client, _ = make_client([FakeResponse(status_code=403)] * 40)
+
+    with pytest.raises(ThrottledOut):
+        for _ in range(10):
+            client.fetch("wind", "ALL", date(2026, 1, 15), date(2026, 1, 15))
+
+    assert client.throttle_budget_spent
+
+
+def test_gives_up_after_repeated_throttling():
+    client, _ = make_client([FakeResponse(status_code=403)] * 40)
+    with pytest.raises(ThrottledOut, match="allowance looks spent"):
+        client.fetch("wind", "ALL", date(2026, 1, 15), date(2026, 1, 15))
+
+
+def test_throttled_out_is_a_grid_client_error():
+    """So existing handlers still catch it, but ingest can special-case it."""
+    assert issubclass(ThrottledOut, GridClientError)
+
+
+def test_throttling_does_not_consume_retry_budget():
+    """Cool-downs and transient retries are separate allowances."""
+    client, _ = make_client([
+        FakeResponse(status_code=403),
+        FakeResponse(status_code=503),
+        FakeResponse(status_code=403),
+        FakeResponse(payload={"Status": "Success", "Rows": [ROW]}),
+    ])
+    readings = client.fetch("wind", "ALL", date(2026, 1, 15), date(2026, 1, 15))
+    assert len(readings) == 1
 
 
 def test_backwards_range_is_rejected():

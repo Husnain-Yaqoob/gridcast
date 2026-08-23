@@ -16,7 +16,8 @@ what it is now" — a persistence baseline — is unreasonably difficult to beat
 Any model here is reported against that baseline at every horizon, including
 the horizons where it loses.
 
-> **Status:** ingestion pipeline complete and tested. Forecasting is next.
+> **Status:** a full year of all-island data collected (260k+ readings).
+> Features and baselines built. Models next.
 
 ---
 
@@ -84,6 +85,7 @@ a backfill rather than halfway through one.
 | `backfill --days N` | Loads N days of history for every series |
 | `update` | Fetches whatever has appeared since the last run |
 | `status` | What is held, how complete it is, how recent runs went |
+| `baseline` | Scores the naive forecasts, by horizon |
 
 Add `-v` to watch each request.
 
@@ -159,12 +161,74 @@ Carbon intensity has been seen to lag wind by a settlement period. A single
 global watermark would either re-fetch everything every run or silently skip
 whichever series lags.
 
-### Requests are chunked
+### We got throttled, and the fix was to ask less
 
-Backfill is split into weekly requests. This is not an optimisation — a single
-request for a year of 15-minute data asks the service to assemble tens of
-thousands of rows, which is exactly the behaviour the fair-use clause exists to
-prevent.
+The first full backfill was rate-limited. `demand` completed fifteen weekly
+windows and then started receiving `403`. `wind` managed six before the same
+thing happened, `generation` one. Each series got fewer successes than the one
+before it — the signature of a token bucket draining faster than it refills.
+
+The licence reserves EirGrid's right to do exactly this, so the response was to
+be less demanding rather than more persistent. Three changes:
+
+**Bigger windows.** Four weeks per request instead of one. A month of
+quarter-hourly data is about 2,900 rows — a comfortable response — and it cuts
+a year-long backfill from 318 requests to 84. Fewer moderate requests is
+gentler on a service than many small ones, and this is the change that mattered
+most.
+
+**A longer gap.** Five seconds between requests rather than 1.5.
+
+**403 treated as throttling, not refusal.** A `403` here does not mean "you may
+never have this" — the identical request succeeds a minute later. It means "you
+have asked too often". Retrying it on a two-second backoff is both useless and
+rude, so the client waits two minutes, then four, then six, and gives up on the
+series after three cool-downs rather than hammering away.
+
+### The fetch ledger, so a re-run resumes
+
+`fetch_log` records every window successfully retrieved. A backfill skips
+windows already in it.
+
+Without this, being throttled is unrecoverable in practice: every re-run
+re-requests the same early months, gets cut off at roughly the same point, and
+never reaches the later ones no matter how many times it is run. With it, each
+attempt makes progress and the backfill completes across as many runs as it
+takes.
+
+The ledger is deliberately separate from the readings themselves. "I asked for
+October and October was genuinely empty" and "I never asked for October" are
+different facts, and counting rows cannot distinguish them.
+
+One exception: a window running up to today is never recorded as complete,
+because the rest of today has not been published yet. Marking it done would
+freeze the series at that moment and no later run would revisit it.
+
+`--fresh` ignores the ledger and re-requests everything, for when the stored
+data is suspect.
+
+### Work is committed as it arrives
+
+A backfill makes over three hundred requests across twenty minutes. Each
+weekly chunk is written to the database the moment it lands, rather than
+accumulating a year in memory and writing once at the end.
+
+The first version did the latter, and the first real backfill proved why that
+was wrong: it was interrupted partway through the third series, and every
+request made up to that point was discarded. Twenty minutes of politely-rate-
+limited fetching, an empty database, and nothing to show for it.
+
+Stopping the job now keeps everything already fetched, and re-running continues
+from where it stopped — which the idempotent upsert already made safe.
+
+### Ctrl+C is handled, because it is not an Exception
+
+`KeyboardInterrupt` inherits from `BaseException`, not `Exception`, so a broad
+`except Exception` never sees it. The process died where it stood and left an
+open row in the run log with no finish time, which reads forever afterwards as
+"this job is still running".
+
+It is now caught explicitly, recorded as `cancelled`, and exits with code 130.
 
 ### 503 is retried, 404 is not
 
@@ -176,6 +240,55 @@ That distinction was originally a bug: `raise_for_status()` throws `HTTPError`,
 which is a subclass of `RequestException`, so the first version of the retry
 loop caught it and cheerfully retried permanent failures four times. A test
 caught it.
+
+### interconnection is published per jurisdiction
+
+Every other series returns all-island rows. `interconnection` returns separate
+ROI, NI and ALL rows whatever region is requested — East-West lands in ROI,
+Moyle in NI.
+
+The parser keeps whatever region each row declares, so the database holds all
+three. That is more data, not wrong data, but any pivot must filter on region
+or those timestamps triple and every join is quietly corrupted.
+
+### SNSP is half-hourly, and filled by exactly one step
+
+SNSP is published every 30 minutes where the rest are quarter-hourly, so on the
+model's index every other SNSP slot is empty. It is forward-filled by one step
+and no more.
+
+One step asserts that the SNSP measured at 10:00 still applied at 10:15, which
+is true of a quantity that moves slowly. An unlimited fill would assert that
+the last reading before a three-day outage applied for three days — invention
+dressed up as data.
+
+### No feature may see the future
+
+Everything in `features.py` is a fact about the present or the past. The target
+is shifted backwards rather than the features forwards, so every row stays
+anchored to the moment the forecast is made.
+
+There is a test that corrupts all data after a cut point and asserts no feature
+value at or before the cut moves. Leakage is the one bug that makes a model
+look *better*, which is why it survives into so many finished projects.
+
+### Time of day is encoded on a circle
+
+Hour 23 and hour 0 are adjacent in reality. As plain integers they are
+twenty-three apart, and a model is told midnight is the opposite of 11pm.
+Sine/cosine pairs put them next to each other, where they belong.
+
+### Validation walks forward, and always reports the baseline
+
+Splits are expanding-window: train strictly on the past, test strictly on the
+future. A random split lets a model learn from Thursday to predict Wednesday,
+which raises the score and destroys the forecast.
+
+Every horizon is reported against a persistence baseline — "output will not
+change" — including the horizons where a model loses to it. At one hour ahead
+persistence is genuinely hard to beat; by six hours it degrades enough that
+even the long-run mean overtakes it. That crossover is a finding, and hiding it
+would make the numbers meaningless.
 
 ### SQLite, not a server
 
@@ -196,8 +309,11 @@ gridcast/
 │   ├── client.py     HTTP access, retries, chunking
 │   ├── store.py      SQLite storage and idempotent upsert
 │   ├── ingest.py     orchestration and run logging
+│   ├── frame.py      readings -> a regular, modellable time series
+│   ├── features.py   lags, ramps, calendar encodings
+│   ├── evaluate.py   baselines and walk-forward validation
 │   └── cli.py        command line
-├── tests/            43 tests, no network access required
+├── tests/            84 tests, no network access required
 └── data/             the database lives here (gitignored)
 ```
 
@@ -213,7 +329,7 @@ python -m pytest
 
 ## Roadmap
 
-- [x] Ingestion, storage, scheduling, run logging
+- [x] Ingestion, storage, scheduling, run logging (chunk-by-chunk commits, resumable)
 - [ ] Feature engineering — lags, rolling means, ramp rates, hour and season
 - [ ] Persistence baseline, evaluated with walk-forward validation
 - [ ] Forecast models at +1h, +3h and +6h, reported against that baseline

@@ -16,7 +16,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Iterable, Iterator, Sequence
 
 from .models import Reading
@@ -33,6 +33,27 @@ CREATE TABLE IF NOT EXISTS reading (
 );
 
 CREATE INDEX IF NOT EXISTS ix_reading_area_ts ON reading (area, region, ts_utc);
+
+-- A ledger of windows successfully fetched.
+--
+-- Without it, a backfill interrupted by throttling has no way to know what it
+-- already asked for, so re-running re-requests everything from the start —
+-- which, against a service that is already rate-limiting us, means never
+-- getting past the first few months no matter how many times we try.
+--
+-- Deliberately separate from the readings. "I asked for October and October
+-- was genuinely empty" and "I never asked for October" are different facts,
+-- and counting rows cannot tell them apart.
+CREATE TABLE IF NOT EXISTS fetch_log (
+    area          TEXT NOT NULL,
+    region        TEXT NOT NULL,
+    window_start  TEXT NOT NULL,   -- ISO date
+    window_end    TEXT NOT NULL,
+    rows_returned INTEGER NOT NULL,
+    fetched_at    TEXT NOT NULL,
+
+    PRIMARY KEY (area, region, window_start, window_end)
+);
 
 -- Every run leaves a record of itself. An unattended pipeline that silently
 -- stops is indistinguishable from one that is working, right up until someone
@@ -141,6 +162,63 @@ class Store:
             )
         result.rows_written = len(batch)
         return result
+
+    # --------------------------------------------------------- fetch ledger
+    def mark_window_fetched(self, area: str, region: str,
+                            window_start: date, window_end: date,
+                            rows_returned: int) -> None:
+        """Record that this window was successfully retrieved."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO fetch_log
+                    (area, region, window_start, window_end, rows_returned, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(area, region, window_start, window_end) DO UPDATE SET
+                    rows_returned = excluded.rows_returned,
+                    fetched_at    = excluded.fetched_at
+                """,
+                (area, region, window_start.isoformat(), window_end.isoformat(),
+                 rows_returned, _iso(datetime.now(timezone.utc))),
+            )
+
+    def window_fetched(self, area: str, region: str,
+                       window_start: date, window_end: date) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM fetch_log
+                 WHERE area = ? AND region = ?
+                   AND window_start = ? AND window_end = ?
+                """,
+                (area, region, window_start.isoformat(), window_end.isoformat()),
+            ).fetchone()
+        return row is not None
+
+    def forget_window(self, area: str, region: str,
+                      window_start: date, window_end: date) -> None:
+        """Drop a ledger entry so the window is fetched again.
+
+        Needed for the trailing window of a backfill: 'today' is still being
+        published, so a window ending today is complete only in the sense that
+        the request succeeded.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM fetch_log
+                 WHERE area = ? AND region = ?
+                   AND window_start = ? AND window_end = ?
+                """,
+                (area, region, window_start.isoformat(), window_end.isoformat()),
+            )
+
+    def windows_fetched(self, area: str, region: str) -> int:
+        with self._connect() as connection:
+            return int(connection.execute(
+                "SELECT COUNT(*) FROM fetch_log WHERE area = ? AND region = ?",
+                (area, region),
+            ).fetchone()[0])
 
     def start_run(self, command: str) -> int:
         with self._connect() as connection:

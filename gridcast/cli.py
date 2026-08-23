@@ -15,7 +15,8 @@ from datetime import date, datetime, timedelta
 
 from . import ingest
 from .client import GridClient
-from .config import ATTRIBUTION, AREAS, DEFAULT_DB_PATH, DEFAULT_REGION, REGIONS
+from .config import (ATTRIBUTION, AREAS, DEFAULT_DB_PATH, DEFAULT_REGION,
+                     MAX_DAYS_PER_REQUEST, REQUEST_INTERVAL_SECONDS, REGIONS)
 from .store import Store
 
 
@@ -49,9 +50,19 @@ def cmd_backfill(args) -> int:
     start = end - timedelta(days=args.days)
 
     print(f"Backfilling {start} to {end} for region {args.region}")
-    print(f"{len(AREAS)} series, chunked into weekly requests. This will take a while.\n")
+    print(f"{len(AREAS)} series in {MAX_DAYS_PER_REQUEST}-day windows, "
+          f"{REQUEST_INTERVAL_SECONDS:.0f}s apart.")
+    print("Each window is saved as it arrives, and windows already held are "
+          "skipped,\nso this is safe to stop and re-run until it completes.\n")
 
-    result = ingest.backfill(store, client, start, end, region=args.region)
+    try:
+        result = ingest.backfill(store, client, start, end, region=args.region,
+                                 resume=not args.fresh)
+    except ingest.Cancelled:
+        print(f"\nStopped. {store.count():,} readings are saved — re-run "
+              f"'backfill' to continue.", file=sys.stderr)
+        return 130      # conventional exit code for SIGINT
+
     print(f"\n{result.summary}")
     print(f"Database now holds {store.count():,} readings.")
     return 0
@@ -60,9 +71,71 @@ def cmd_backfill(args) -> int:
 def cmd_update(args) -> int:
     store = Store(args.db)
     client = GridClient()
-    result = ingest.update(store, client, region=args.region)
+    try:
+        result = ingest.update(store, client, region=args.region)
+    except ingest.Cancelled:
+        print(f"\nStopped. {store.count():,} readings are saved.", file=sys.stderr)
+        return 130
     print(result.summary)
     return 0
+
+
+def cmd_baseline(args) -> int:
+    """Score the naive forecasts on the collected data.
+
+    Deliberately the first modelling command. Before any model is built, these
+    numbers say what the problem is worth solving and how much of it is already
+    solved by doing nothing clever.
+    """
+    try:
+        from .frame import coverage_report, load_wide, wind_share
+        from . import evaluate, features
+    except ImportError:
+        print("This needs the analysis extras:\n"
+              '    pip install -e ".[analysis]"', file=sys.stderr)
+        return 1
+
+    frame = load_wide(args.db, region=args.region)
+
+    print(f"{len(frame):,} rows, {frame.index.min():%Y-%m-%d} to "
+          f"{frame.index.max():%Y-%m-%d}\n")
+    print(coverage_report(frame).to_string())
+
+    share = wind_share(frame)
+    print(f"\nWind as a share of demand: mean {share.mean():.1f}%, "
+          f"max {share.max():.1f}%")
+    if "co2_intensity" in frame:
+        by_hour = frame.groupby(frame.index.hour)["co2_intensity"].mean()
+        print(f"Carbon intensity: dirtiest hour {by_hour.idxmax():02d}:00 "
+              f"({by_hour.max():.0f} gCO2/kWh), "
+              f"cleanest {by_hour.idxmin():02d}:00 ({by_hour.min():.0f})")
+
+    print("\nBaseline forecasts, by horizon")
+    print("=" * 78)
+    for hours in args.horizons:
+        steps = features.horizon_steps(hours)
+        X, y = features.build_dataset(frame, steps)
+        print(f"\n{hours}h ahead — {len(X):,} usable rows")
+        for score in evaluate.evaluate_baselines(X, y, hours):
+            print(f"  {score}")
+
+    print("\nSkill is measured against persistence. A model that cannot beat")
+    print("these numbers is not earning its complexity.")
+    print(f"\n{ATTRIBUTION}")
+    return 0
+
+
+def _print_runs(store: Store, limit: int = 5) -> None:
+    runs = store.recent_runs(limit)
+    if not runs:
+        return
+    print("Recent runs:")
+    for run in runs:
+        state = run["status"] or "running"
+        print(f"  #{run['id']:<4} {run['started_at'][:16]}  {run['command']:<28} "
+              f"{state:<8} {run['rows_written'] or 0:>7,} rows")
+        if run["detail"]:
+            print(f"        {run['detail'][:100]}")
 
 
 def cmd_status(args) -> int:
@@ -70,7 +143,13 @@ def cmd_status(args) -> int:
     rows = store.coverage()
 
     if not rows:
-        print("No data held yet. Run 'probe', then 'backfill'.")
+        print("No readings held yet.\n")
+        # Show the run log anyway. An empty database with three failed runs
+        # behind it is a completely different situation from an empty database
+        # that has never been used, and "run backfill" is unhelpful advice for
+        # the first one.
+        _print_runs(store)
+        print("\nIf there are no runs above, start with 'probe' then 'backfill'.")
         return 0
 
     print(f"{'series':<16} {'region':<7} {'rows':>8} {'null':>7} "
@@ -81,17 +160,7 @@ def cmd_status(args) -> int:
               f"{row['nulls']:>7,} {row['first_ts'][:16]:<17} {row['last_ts'][:16]:<17}")
 
     print(f"\nTotal: {store.count():,} readings\n")
-
-    runs = store.recent_runs(5)
-    if runs:
-        print("Recent runs:")
-        for run in runs:
-            state = run["status"] or "running"
-            print(f"  #{run['id']:<4} {run['started_at'][:16]}  {run['command']:<28} "
-                  f"{state:<8} {run['rows_written'] or 0:>7,} rows")
-            if run["detail"]:
-                print(f"        {run['detail'][:100]}")
-
+    _print_runs(store)
     print(f"\n{ATTRIBUTION}")
     return 0
 
@@ -153,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("backfill", help="load historical data", parents=[common])
     p.add_argument("--days", type=int, default=365, help="how far back to go")
     p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--fresh", action="store_true",
+                   help="re-request windows already fetched (ignores the ledger)")
     p.set_defaults(func=cmd_backfill)
 
     p = sub.add_parser("update", help="fetch anything new since the last run",
@@ -163,6 +234,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("status", help="show what is held and how recent runs went",
                        parents=[common])
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("baseline", help="score the naive forecasts on the data",
+                       parents=[common])
+    p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--horizons", type=float, nargs="+", default=[1, 3, 6, 12],
+                   help="forecast horizons in hours")
+    p.set_defaults(func=cmd_baseline)
 
     args = _apply_shared_defaults(parser.parse_args(argv))
     _configure_logging(args.verbose)
