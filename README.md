@@ -16,8 +16,58 @@ what it is now" — a persistence baseline — is unreasonably difficult to beat
 Any model here is reported against that baseline at every horizon, including
 the horizons where it loses.
 
-> **Status:** a full year of all-island data collected (260k+ readings).
-> Features and baselines built. Models next.
+![gridcast API returning a wind forecast](docs/api.png)
+
+---
+
+## Results
+
+A year of all-island data, 263,000+ readings, 99.99% complete. Models validated
+by walk-forward cross-validation over five expanding folds, each scored against
+a persistence baseline measured on exactly the same rows.
+
+| Horizon | Model MAE | Persistence MAE | Skill |
+|---|---|---|---|
+| **1 hour** | **105.3 MW** | 120.8 MW | **+12.8%, in every fold** |
+| 3 hours | 269.6 MW | 285.8 MW | +5.7% |
+| 6 hours | 492.8 MW | 469.2 MW | −5.0% |
+| 12 hours | 788.4 MW | 698.2 MW | −12.9% |
+
+**The model beats persistence at one hour and loses beyond three.** That shape
+is the finding, and it is reported rather than hidden.
+
+Two reasons for it. Past a few hours, wind output is determined by weather this
+dataset does not contain — a front arriving, a pressure gradient shifting.
+Operational forecasters feed numerical weather prediction in for exactly that
+reason, and no amount of feature engineering recovers information that was
+never collected. Meanwhile persistence has no parameters, so it cannot overfit,
+and its relative advantage grows with horizon.
+
+Permutation importance at one hour explains where the 12.8% comes from:
+
+```
+wind_now      510.11  ########################################
+wind_ramp4      8.46  #
+wind_lag12      2.32
+wind_lag24      2.32
+wind_ramp1      2.05
+```
+
+Only two features matter. Persistence knows the current *level*; the model also
+knows which way output is *moving*. That is the entire edge.
+
+### What the data itself says
+
+- **Wind covered 34.5% of Irish demand on average, and peaked at 98.6%** — there
+  was a moment last year when wind was generating almost the whole country's
+  electricity.
+- The grid is **dirtiest at 04:00** (199 gCO2/kWh) and **cleanest at 11:00**
+  (164). Counterintuitive until you notice that overnight demand collapses while
+  must-run thermal plant stays on, so its share of the mix rises even as total
+  emissions fall.
+- A seasonal-naive forecast — *yesterday at this time* — is **worse than
+  predicting the long-run mean**. Wind has essentially no daily cycle, which is
+  the opposite of demand on the same grid.
 
 ---
 
