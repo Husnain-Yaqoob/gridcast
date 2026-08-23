@@ -89,8 +89,39 @@ a backfill rather than halfway through one.
 | `train` | Trains and validates a model per horizon against persistence |
 | `importance` | Which features the model actually relies on |
 | `forecast` | Predicts from the most recent data held |
+| `serve` | Runs the forecast API |
 
 Add `-v` to watch each request.
+
+### The API
+
+```bash
+pip install -e ".[api]"
+python -m gridcast serve
+```
+
+Interactive documentation at `http://127.0.0.1:8000/docs`.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /health` | Liveness, which models are loaded, cache age |
+| `GET /horizons` | What can be forecast, and how each scored in validation |
+| `GET /latest` | Most recent observed grid state |
+| `GET /forecast?horizon=1` | A prediction, with its validated error and skill |
+
+```json
+{
+  "made_at_utc": "2026-08-23T22:15:00Z",
+  "valid_at_utc": "2026-08-23T23:15:00Z",
+  "horizon_hours": 1.0,
+  "predicted_wind_mw": 470.2,
+  "current_wind_mw": 450.0,
+  "expected_error_mw": 105.3,
+  "persistence_error_mw": 120.8,
+  "skill_vs_persistence_pct": 12.8,
+  "attribution": "Supported by EirGrid Group Data"
+}
+```
 
 ### Keeping it current
 
@@ -333,6 +364,35 @@ columns it expects, how many rows it trained on, and its validation scores. A
 `.joblib` on disk with none of that is an object nobody can safely use six
 months later.
 
+### The API returns the status code that describes the failure
+
+A horizon with no trained model is a `404` — that resource genuinely does not
+exist, and the body names the horizons that do. A database with no usable data
+is a `503` — the service is temporarily unable to answer and the caller should
+retry. A horizon of zero or 100 is a `422`, rejected by validation before any
+work happens.
+
+Plenty of APIs answer everything with `200` and hide the problem in the body.
+That makes failure invisible to monitoring, to retry logic and to every
+automated caller. "It returned a response" is not "it worked".
+
+### Models load once, data is cached with a deadline
+
+Deserialising a gradient booster takes a noticeable fraction of a second, so
+doing it per request would turn a 5ms response into a 300ms one for a file that
+has not changed.
+
+The data frame is different: it *does* change, hourly. So it is cached for five
+minutes rather than forever — fresher than the source can possibly be, without
+re-reading 35,000 rows on every call. Caching it indefinitely would serve a
+forecast anchored to yesterday while claiming to be current.
+
+### Every forecast ships with its own error bar
+
+The response carries the model's validated MAE, the persistence MAE it was
+measured against, and the skill between them. A prediction without an error bar
+invites false confidence, and one without its baseline cannot be judged at all.
+
 ### SQLite, not a server
 
 This pipeline runs on a laptop and collects a few thousand rows a day. A
@@ -356,8 +416,9 @@ gridcast/
 │   ├── features.py   lags, ramps, calendar encodings
 │   ├── evaluate.py   baselines and walk-forward validation
 │   ├── model.py      training, validation, saving, forecasting
+│   ├── api.py        FastAPI service
 │   └── cli.py        command line
-├── tests/            98 tests, no network access required
+├── tests/            113 tests, no network access required
 └── data/             the database lives here (gitignored)
 ```
 

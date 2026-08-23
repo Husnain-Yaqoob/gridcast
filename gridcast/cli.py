@@ -232,6 +232,32 @@ def cmd_forecast(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    """Run the forecast API."""
+    try:
+        import uvicorn
+        from .api import ForecastService, create_app
+    except ImportError:
+        print('This needs the API extras:\n    pip install -e ".[api]"',
+              file=sys.stderr)
+        return 1
+
+    service = ForecastService(db_path=args.db, model_dir=args.model_dir,
+                              region=args.region)
+    app = create_app(service)
+
+    if not service.available_horizons:
+        print("No trained models found. Train some first:\n"
+              "    python -m gridcast train --save", file=sys.stderr)
+        return 1
+
+    print(f"Models loaded for horizons: "
+          f"{', '.join(f'{h:g}h' for h in service.available_horizons)}")
+    print(f"Interactive docs: http://{args.host}:{args.port}/docs\n")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
 def _print_runs(store: Store, limit: int = 5) -> None:
     runs = store.recent_runs(limit)
     if not runs:
@@ -371,6 +397,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--horizon", type=float, default=6)
     p.add_argument("--model-dir", default="models")
     p.set_defaults(func=cmd_forecast)
+
+    p = sub.add_parser("serve", help="run the forecast API", parents=[common])
+    p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--model-dir", default="models")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.set_defaults(func=cmd_serve)
 
     args = _apply_shared_defaults(parser.parse_args(argv))
     _configure_logging(args.verbose)
