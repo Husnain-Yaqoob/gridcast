@@ -125,6 +125,113 @@ def cmd_baseline(args) -> int:
     return 0
 
 
+def cmd_train(args) -> int:
+    """Train and evaluate a model per horizon, against persistence."""
+    try:
+        from .frame import load_wide
+        from . import model as model_module
+    except ImportError:
+        print('This needs the analysis extras:\n    pip install -e ".[analysis]"',
+              file=sys.stderr)
+        return 1
+
+    frame = load_wide(args.db, region=args.region)
+    print(f"{len(frame):,} rows, {frame.index.min():%Y-%m-%d} to "
+          f"{frame.index.max():%Y-%m-%d}")
+    print(f"Walk-forward validation, {args.folds} expanding folds. "
+          f"Training on the past, testing on the future, every time.\n")
+
+    results = []
+    for hours in args.horizons:
+        print(f"--- {hours}h ahead")
+        result = model_module.evaluate_horizon(frame, hours, n_splits=args.folds)
+        results.append(result)
+
+        for fold in result.folds:
+            arrow = "+" if fold.skill > 0 else " "
+            print(f"    fold {fold.fold}  train {fold.train_rows:>6,}  "
+                  f"test {fold.test_rows:>5,}  "
+                  f"MAE {fold.model_mae:>7.1f} vs {fold.baseline_mae:>7.1f}  "
+                  f"{arrow}{fold.skill:>5.1f}%")
+
+        if args.save:
+            trained, columns, rows = model_module.train_final(frame, hours)
+            path = model_module.save(trained, columns, hours, rows, result,
+                                     directory=args.model_dir)
+            print(f"    saved {path}")
+        print()
+
+    print("Summary")
+    print("=" * 78)
+    for result in results:
+        print(f"  {result.summary()}")
+
+    winners = [r for r in results if r.beats_baseline]
+    print(f"\nBeats persistence at {len(winners)} of {len(results)} horizons.")
+    if winners:
+        best = max(winners, key=lambda r: r.skill)
+        print(f"Best gain: {best.skill:.1f}% at {best.horizon_hours:g}h.")
+    losers = [r for r in results if not r.beats_baseline]
+    for result in losers:
+        print(f"Loses to persistence at {result.horizon_hours:g}h — reported "
+              f"because hiding it would make the rest meaningless.")
+
+    print(f"\n{ATTRIBUTION}")
+    return 0
+
+
+def cmd_importance(args) -> int:
+    """Which features the model actually relies on."""
+    try:
+        from .frame import load_wide
+        from . import model as model_module
+    except ImportError:
+        print('This needs the analysis extras:\n    pip install -e ".[analysis]"',
+              file=sys.stderr)
+        return 1
+
+    frame = load_wide(args.db, region=args.region)
+    print(f"Permutation importance at {args.horizon}h "
+          f"(MAE increase when a column is shuffled)\n")
+
+    scores = model_module.feature_importance(frame, args.horizon)
+    for name, value in scores.head(args.top).items():
+        bar = "#" * int(max(0, value) / max(scores.max(), 1e-9) * 40)
+        print(f"  {name:<24} {value:>8.2f}  {bar}")
+
+    print(f"\n{ATTRIBUTION}")
+    return 0
+
+
+def cmd_forecast(args) -> int:
+    """Predict from the most recent data held."""
+    try:
+        from .frame import load_wide
+        from . import model as model_module
+    except ImportError:
+        print('This needs the analysis extras:\n    pip install -e ".[analysis]"',
+              file=sys.stderr)
+        return 1
+
+    frame = load_wide(args.db, region=args.region)
+    try:
+        forecast = model_module.predict_latest(frame, args.horizon,
+                                               directory=args.model_dir)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"Forecast made at    {forecast['made_at_utc']}")
+    print(f"Valid at            {forecast['valid_at_utc']}")
+    print(f"Current wind        {forecast['current_wind_mw']:,.1f} MW")
+    print(f"Predicted wind      {forecast['predicted_wind_mw']:,.1f} MW")
+    if forecast["expected_error_mw"]:
+        print(f"Typical error       +/- {forecast['expected_error_mw']:,.1f} MW "
+              f"(validated MAE)")
+    print(f"\n{forecast['attribution']}")
+    return 0
+
+
 def _print_runs(store: Store, limit: int = 5) -> None:
     runs = store.recent_runs(limit)
     if not runs:
@@ -241,6 +348,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--horizons", type=float, nargs="+", default=[1, 3, 6, 12],
                    help="forecast horizons in hours")
     p.set_defaults(func=cmd_baseline)
+
+    p = sub.add_parser("train", help="train and evaluate models against persistence",
+                       parents=[common])
+    p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--horizons", type=float, nargs="+", default=[1, 3, 6, 12])
+    p.add_argument("--folds", type=int, default=5, help="walk-forward folds")
+    p.add_argument("--save", action="store_true", help="save the trained models")
+    p.add_argument("--model-dir", default="models")
+    p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("importance", help="which features the model relies on",
+                       parents=[common])
+    p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--horizon", type=float, default=6)
+    p.add_argument("--top", type=int, default=15)
+    p.set_defaults(func=cmd_importance)
+
+    p = sub.add_parser("forecast", help="predict from the most recent data",
+                       parents=[common])
+    p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--horizon", type=float, default=6)
+    p.add_argument("--model-dir", default="models")
+    p.set_defaults(func=cmd_forecast)
 
     args = _apply_shared_defaults(parser.parse_args(argv))
     _configure_logging(args.verbose)

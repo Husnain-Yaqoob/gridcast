@@ -28,3 +28,8 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Trained models are derived artefacts — rebuilt with `gridcast train --save`.
+# The manifests beside them are small and record the validation results,
+# so those are tracked.
+models/*.joblib

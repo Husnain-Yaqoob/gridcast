@@ -86,6 +86,9 @@ a backfill rather than halfway through one.
 | `update` | Fetches whatever has appeared since the last run |
 | `status` | What is held, how complete it is, how recent runs went |
 | `baseline` | Scores the naive forecasts, by horizon |
+| `train` | Trains and validates a model per horizon against persistence |
+| `importance` | Which features the model actually relies on |
+| `forecast` | Predicts from the most recent data held |
 
 Add `-v` to watch each request.
 
@@ -290,6 +293,46 @@ persistence is genuinely hard to beat; by six hours it degrades enough that
 even the long-run mean overtakes it. That crossover is a finding, and hiding it
 would make the numbers meaningless.
 
+### One model per horizon, not one model with a horizon input
+
+Predicting one hour ahead and twelve hours ahead are different problems. At one
+hour, current output dominates and little else matters. At twelve, current
+output is nearly irrelevant and the model must lean on season, time of day and
+recent variability. A single model forced to serve both learns a compromise
+that is good at neither.
+
+### The baseline is scored on exactly the same rows as the model
+
+Within each fold, persistence is evaluated on that fold's test set — not on the
+whole series, and not on a different sample. Comparing a model measured on one
+set of rows to a baseline measured on another is not a comparison, however
+favourable the numbers look.
+
+### The headline MAE is weighted by rows
+
+Folds differ in size, because the training window expands. Averaging the
+per-fold MAEs would overweight the smallest fold; weighting by row count gives
+the error an average prediction actually carries.
+
+### Winning on average is reported separately from winning every time
+
+A model that wins overall but loses in two folds out of five is not reliably
+better — it caught a favourable stretch of weather. `train` marks that case, so
+the headline number is never quoted without it.
+
+### Missing values are passed to the model, not imputed
+
+The gradient booster handles NaN natively. The auxiliary series have real gaps,
+and filling them would invent readings the grid never published. Letting the
+model learn "this was missing" is both more honest and more accurate.
+
+### The model ships with a manifest
+
+Every saved model writes a JSON file recording its horizon, the exact feature
+columns it expects, how many rows it trained on, and its validation scores. A
+`.joblib` on disk with none of that is an object nobody can safely use six
+months later.
+
 ### SQLite, not a server
 
 This pipeline runs on a laptop and collects a few thousand rows a day. A
@@ -312,8 +355,9 @@ gridcast/
 │   ├── frame.py      readings -> a regular, modellable time series
 │   ├── features.py   lags, ramps, calendar encodings
 │   ├── evaluate.py   baselines and walk-forward validation
+│   ├── model.py      training, validation, saving, forecasting
 │   └── cli.py        command line
-├── tests/            84 tests, no network access required
+├── tests/            98 tests, no network access required
 └── data/             the database lives here (gitignored)
 ```
 
