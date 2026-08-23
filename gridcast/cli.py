@@ -96,32 +96,75 @@ def cmd_status(args) -> int:
     return 0
 
 
+# Shared flag defaults, applied after parsing rather than by argparse itself.
+# See _common_options for why.
+SHARED_DEFAULTS = {"db": DEFAULT_DB_PATH, "verbose": False}
+
+
+def _common_options() -> argparse.ArgumentParser:
+    """Flags every subcommand accepts, in either position.
+
+    Two argparse behaviours collide here, and the fix needs both halves.
+
+    First: a flag defined only on the top-level parser is rejected after the
+    subcommand, so `gridcast backfill -v` fails while `gridcast -v backfill`
+    works. Sharing the flags with every subparser via `parents=` fixes that.
+
+    Second, and less obvious: once both parsers define the same flag, the
+    subparser applies its own default *after* the top-level parser has already
+    stored the real value — so `gridcast -v backfill` silently reverts verbose
+    to False. This is long-standing argparse behaviour, not a mistake in the
+    calling code.
+
+    Suppressing the defaults means an unsupplied flag leaves no attribute at
+    all, so nothing can be overwritten. The defaults are then applied once,
+    after parsing, in `_apply_shared_defaults`.
+    """
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--db", default=argparse.SUPPRESS,
+                        help=f"SQLite database path (default: {DEFAULT_DB_PATH})")
+    common.add_argument("-v", "--verbose", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="log each request as it is made")
+    return common
+
+
+def _apply_shared_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    for key, value in SHARED_DEFAULTS.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    return args
+
+
 def main(argv: list[str] | None = None) -> int:
+    common = _common_options()
     parser = argparse.ArgumentParser(
         prog="gridcast",
         description="Ingest and forecast Irish grid data from EirGrid.",
         epilog=ATTRIBUTION,
+        parents=[common],
     )
-    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite database path")
-    parser.add_argument("-v", "--verbose", action="store_true", help="log each request")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("probe", help="check the dashboard is answering")
+    p = sub.add_parser("probe", help="check the dashboard is answering",
+                       parents=[common])
     p.set_defaults(func=cmd_probe)
 
-    p = sub.add_parser("backfill", help="load historical data")
+    p = sub.add_parser("backfill", help="load historical data", parents=[common])
     p.add_argument("--days", type=int, default=365, help="how far back to go")
     p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
     p.set_defaults(func=cmd_backfill)
 
-    p = sub.add_parser("update", help="fetch anything new since the last run")
+    p = sub.add_parser("update", help="fetch anything new since the last run",
+                       parents=[common])
     p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
     p.set_defaults(func=cmd_update)
 
-    p = sub.add_parser("status", help="show what is held and how recent runs went")
+    p = sub.add_parser("status", help="show what is held and how recent runs went",
+                       parents=[common])
     p.set_defaults(func=cmd_status)
 
-    args = parser.parse_args(argv)
+    args = _apply_shared_defaults(parser.parse_args(argv))
     _configure_logging(args.verbose)
     return args.func(args)
 
