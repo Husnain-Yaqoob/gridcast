@@ -4,6 +4,7 @@
     python -m gridcast backfill --days 365   load a year of history
     python -m gridcast update                fetch whatever is new
     python -m gridcast status                what is held, and did the last run work?
+    python -m gridcast report                draw the charts into docs/
 """
 
 from __future__ import annotations
@@ -232,6 +233,42 @@ def cmd_forecast(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    """Render the charts as PNGs.
+
+    Written to files rather than shown in a window, because the audience for
+    these is whoever opens the repository on GitHub, not whoever happens to be
+    sitting at this machine.
+    """
+    try:
+        from .frame import load_wide
+        from . import report
+    except ImportError:
+        print('This needs the analysis extras:\n    pip install -e ".[analysis]"',
+              file=sys.stderr)
+        return 1
+
+    frame = load_wide(args.db, region=args.region)
+    print(f"{len(frame):,} rows, {frame.index.min():%Y-%m-%d} to "
+          f"{frame.index.max():%Y-%m-%d}")
+    print(f"Rendering charts into {args.output_dir}/\n")
+
+    written = report.render_all(frame, output_dir=args.output_dir,
+                                model_dir=args.model_dir, days=args.days)
+
+    if not written:
+        print("\nNothing could be drawn. Check 'status' for what is held.",
+              file=sys.stderr)
+        return 1
+
+    for path in written:
+        print(f"  wrote {path}")
+    print(f"\n{len(written)} chart(s). Embed them in the README with:")
+    print(f"    ![description]({args.output_dir}/wind_share.png)")
+    print(f"\n{ATTRIBUTION}")
+    return 0
+
+
 def cmd_serve(args) -> int:
     """Run the forecast API."""
     try:
@@ -253,6 +290,7 @@ def cmd_serve(args) -> int:
 
     print(f"Models loaded for horizons: "
           f"{', '.join(f'{h:g}h' for h in service.available_horizons)}")
+    print(f"Live dashboard:   http://{args.host}:{args.port}/dashboard")
     print(f"Interactive docs: http://{args.host}:{args.port}/docs\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
@@ -397,6 +435,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--horizon", type=float, default=6)
     p.add_argument("--model-dir", default="models")
     p.set_defaults(func=cmd_forecast)
+
+    p = sub.add_parser("report", help="render the charts as PNGs",
+                       parents=[common])
+    p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)
+    p.add_argument("--output-dir", default="docs",
+                   help="where to write the PNGs (default: docs)")
+    p.add_argument("--model-dir", default="models")
+    p.add_argument("--days", type=int, default=4,
+                   help="how many days of the held-out period to draw")
+    p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("serve", help="run the forecast API", parents=[common])
     p.add_argument("--region", default=DEFAULT_REGION, choices=REGIONS)

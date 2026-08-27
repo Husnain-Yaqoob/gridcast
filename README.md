@@ -16,7 +16,7 @@ what it is now" — a persistence baseline — is unreasonably difficult to beat
 Any model here is reported against that baseline at every horizon, including
 the horizons where it loses.
 
-![gridcast API returning a wind forecast](docs/api.png)
+![gridcast dashboard: live Irish grid state, forecasts with error bands, and skill against persistence](docs/dashboard.png)
 
 ---
 
@@ -56,6 +56,24 @@ wind_ramp1      2.05
 Only two features matter. Persistence knows the current *level*; the model also
 knows which way output is *moving*. That is the entire edge.
 
+### The finding, drawn
+
+![Forecast against what actually happened, at one hour and twelve hours ahead](docs/forecast_vs_actual.png)
+
+At one hour the orange line sits on the blue one. At twelve it wanders — and
+notice that it wanders *confidently*, holding a level the grid left hours ago.
+Both panels share a y-axis on purpose; a separate scale per panel would make a
+790 MW error look the same size as a 105 MW one.
+
+![Skill against a persistence baseline, by forecast horizon](docs/skill_by_horizon.png)
+
+The crossover is the result. Everything to the right of one hour is a model
+losing to a forecast that has no parameters at all.
+
+Both charts are produced by `python -m gridcast report`, from a model fitted on
+the earlier part of the series and scored on the later part. A model plotted
+against data it was trained on produces a beautiful chart that proves nothing.
+
 ### What the data itself says
 
 - **Wind covered 34.5% of Irish demand on average, and peaked at 98.6%** — there
@@ -68,6 +86,18 @@ knows which way output is *moving*. That is the entire edge.
 - A seasonal-naive forecast — *yesterday at this time* — is **worse than
   predicting the long-run mean**. Wind has essentially no daily cycle, which is
   the opposite of demand on the same grid.
+
+![Wind as a share of Irish electricity demand, daily over a year](docs/wind_share.png)
+
+The pale band is each day's full range, and it is the point of the chart. A day
+averaging 40% still contains hours near zero and hours above 100, and that
+spread — not the average — is what makes wind hard to operate around.
+
+![Carbon intensity of Irish electricity by hour of day](docs/carbon_by_hour.png)
+
+Hours here are Irish local time, not UTC. Carbon intensity moves with when
+people cook dinner, and through the summer a UTC label would put the evening
+peak an hour away from the behaviour causing it.
 
 ---
 
@@ -139,7 +169,8 @@ a backfill rather than halfway through one.
 | `train` | Trains and validates a model per horizon against persistence |
 | `importance` | Which features the model actually relies on |
 | `forecast` | Predicts from the most recent data held |
-| `serve` | Runs the forecast API |
+| `report` | Renders the charts above into `docs/` |
+| `serve` | Runs the forecast API and the live dashboard |
 
 Add `-v` to watch each request.
 
@@ -150,14 +181,17 @@ pip install -e ".[api]"
 python -m gridcast serve
 ```
 
-Interactive documentation at `http://127.0.0.1:8000/docs`.
+Live dashboard at `http://127.0.0.1:8000/dashboard`, interactive API
+documentation at `/docs`.
 
 | Endpoint | Returns |
 |---|---|
 | `GET /health` | Liveness, which models are loaded, cache age |
 | `GET /horizons` | What can be forecast, and how each scored in validation |
 | `GET /latest` | Most recent observed grid state |
+| `GET /history?hours=36` | Recent observed readings, oldest first |
 | `GET /forecast?horizon=1` | A prediction, with its validated error and skill |
+| `GET /dashboard` | The live page above, for people rather than programs |
 
 ```json
 {
@@ -193,6 +227,31 @@ the repository as the working directory.
 
 These are the choices that took thought. They are recorded because the
 reasoning is more useful than the code.
+
+### Charts are held to the same standard as the numbers
+
+Two rules, both easy to break by accident.
+
+**A forecast is plotted at the time it is *for*, not the time it was made.** A
+twelve-hour forecast made at noon is a statement about midnight. Drawing it at
+noon shifts the whole line half a day left of the reality it is predicting,
+which produces a chart that looks wrong in a way nobody can quite name. There
+is a test asserting that each row's `actual` value is the reading the database
+actually holds for that row's timestamp.
+
+**The model never sees the period it is drawn against.** `report.backtest()`
+fits on the earlier part of the series and predicts the later part,
+chronologically — never a random split, which on a quantity this
+autocorrelated would let the model train on Thursday and be tested on
+Wednesday. Plotting a model against its own training data is one of the most
+common ways a portfolio project quietly misleads, and it is invisible in the
+finished picture.
+
+The dashboard follows from the same idea. It has no build step, no framework
+and no external requests — partly so it works on a laptop with no internet, and
+partly because every number on it is fetched from this project's own API. If
+the hourly ingest stops, the page says so in red rather than continuing to show
+a reassuring picture of yesterday.
 
 ### A null is not a zero
 

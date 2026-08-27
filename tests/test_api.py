@@ -207,3 +207,63 @@ def test_openapi_schema_is_generated(client):
     assert "/forecast" in schema["paths"]
     assert "/health" in schema["paths"]
     assert schema["info"]["title"] == "gridcast"
+
+
+# ------------------------------------------------------------------ history
+def test_history_returns_recent_readings_oldest_first(client):
+    body = client.get("/history", params={"hours": 6}).json()
+    assert body["count"] > 0
+    times = [r["observed_at_utc"] for r in body["readings"]]
+    assert times == sorted(times)
+    assert all(r["wind_mw"] is not None for r in body["readings"])
+
+
+def test_history_window_is_respected(client):
+    short = client.get("/history", params={"hours": 3}).json()
+    long = client.get("/history", params={"hours": 24}).json()
+    assert short["count"] < long["count"]
+
+
+def test_history_omits_gaps_rather_than_sending_nulls(client):
+    """A chart has to draw something for every row it is given."""
+    body = client.get("/history", params={"hours": 12}).json()
+    assert all(r["demand_mw"] is not None for r in body["readings"])
+
+
+def test_history_with_no_data_is_503(empty_client):
+    assert empty_client.get("/history").status_code == 503
+
+
+@pytest.mark.parametrize("hours", [0, -5, 500])
+def test_nonsense_history_windows_are_422(client, hours):
+    assert client.get("/history", params={"hours": hours}).status_code == 422
+
+
+# ---------------------------------------------------------------- dashboard
+def test_dashboard_serves_html(client):
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "gridcast" in response.text
+
+
+def test_dashboard_is_self_contained(client):
+    """No CDN. It has to work in a room with no internet."""
+    page = client.get("/dashboard").text
+    assert "http://" not in page.replace('"http://www.w3.org/2000/svg"', "")
+    assert "https://" not in page
+    assert "<script" in page and "src=" not in page
+
+
+def test_dashboard_is_not_in_the_openapi_schema(client):
+    """It is a page for people, not an endpoint for programs."""
+    schema = client.get("/openapi.json").json()
+    assert "/dashboard" not in schema["paths"]
+    assert "/history" in schema["paths"]
+
+
+def test_horizons_reports_the_baseline_it_is_measured_against(client):
+    """Skill without the number it is skill over is half a fact."""
+    entry = client.get("/horizons").json()["horizons"][0]
+    assert entry["persistence_error_mw"] > 0
+    assert entry["beat_baseline_in_every_fold"] in (True, False)

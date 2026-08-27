@@ -144,6 +144,38 @@ class ForecastService:
             "attribution": ATTRIBUTION,
         }
 
+    def history(self, hours: float) -> dict:
+        """Recent observations, for drawing a forecast against its own past.
+
+        Rows missing wind or demand are dropped rather than sent as nulls. A
+        chart consuming this has to draw *something* for every row it receives,
+        and the honest thing to draw for a gap is nothing at all.
+        """
+        frame = self.frame()
+        recent = frame.dropna(subset=["wind", "demand"])
+        if recent.empty:
+            raise LookupError("no complete readings held")
+
+        cutoff = recent.index.max() - pd.Timedelta(hours=hours)
+        window = recent[recent.index >= cutoff]
+
+        readings = [
+            {
+                "observed_at_utc": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "wind_mw": round(float(row["wind"]), 1),
+                "demand_mw": round(float(row["demand"]), 1),
+                "wind_share_pct": round(100.0 * float(row["wind"]) / float(row["demand"]), 1)
+                if row["demand"] else None,
+            }
+            for ts, row in window.iterrows()
+        ]
+        return {
+            "hours": float(hours),
+            "count": len(readings),
+            "readings": readings,
+            "attribution": ATTRIBUTION,
+        }
+
     def latest(self) -> dict:
         """Current grid state, straight from the most recent complete reading."""
         frame = self.frame()
@@ -202,13 +234,34 @@ def _response_models():
         expected_error_mw: float | None = Field(
             default=None, description="Validated MAE of this model, in MW"
         )
+        persistence_error_mw: float | None = Field(
+            default=None,
+            description="MAE of the naive baseline on the same validation rows",
+        )
         skill_vs_persistence_pct: float | None = Field(
             default=None, description="Positive means better than persistence"
+        )
+        beat_baseline_in_every_fold: bool | None = Field(
+            default=None,
+            description="False means it won on average but lost in some folds — "
+                        "worth knowing before quoting the headline number.",
         )
         trained_at: str
 
     class Horizons(BaseModel):
         horizons: list[HorizonInfo]
+        attribution: str
+
+    class HistoryReading(BaseModel):
+        observed_at_utc: str
+        wind_mw: float
+        demand_mw: float
+        wind_share_pct: float | None = None
+
+    class History(BaseModel):
+        hours: float = Field(description="Length of the window requested")
+        count: int = Field(description="Readings returned. Gaps are omitted, not nulled.")
+        readings: list[HistoryReading]
         attribution: str
 
     class Latest(BaseModel):
@@ -265,7 +318,7 @@ def _response_models():
             "attribution": ATTRIBUTION,
         }}}
 
-    return Health, Horizons, Latest, Forecast
+    return Health, Horizons, Latest, Forecast, History
 
 
 def create_app(service: ForecastService | None = None):
@@ -277,13 +330,14 @@ def create_app(service: ForecastService | None = None):
     """
     try:
         from fastapi import FastAPI, HTTPException, Query
+        from fastapi.responses import HTMLResponse
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RuntimeError(
             'FastAPI is required to serve the API. Install it with:\n'
             '    pip install -e ".[api]"'
         ) from exc
 
-    Health, Horizons, Latest, Forecast = _response_models()
+    Health, Horizons, Latest, Forecast, History = _response_models()
 
     service = service or ForecastService()
     service.load_models()
@@ -320,8 +374,12 @@ def create_app(service: ForecastService | None = None):
                     "hours": h,
                     "expected_error_mw": service.manifest(h)
                         .get("validation", {}).get("model_mae"),
+                    "persistence_error_mw": service.manifest(h)
+                        .get("validation", {}).get("persistence_mae"),
                     "skill_vs_persistence_pct": service.manifest(h)
                         .get("validation", {}).get("skill_vs_persistence_pct"),
+                    "beat_baseline_in_every_fold": service.manifest(h)
+                        .get("validation", {}).get("beat_baseline_in_every_fold"),
                     "trained_at": service.manifest(h)["trained_at"],
                 }
                 for h in service.available_horizons
@@ -364,5 +422,34 @@ def create_app(service: ForecastService | None = None):
             return service.forecast(horizon)
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/history", tags=["data"], response_model=History,
+             responses={503: {"description": "No usable data held yet"}})
+    def history(
+        hours: float = Query(
+            24.0, gt=0, le=168,
+            description="How far back to return readings. Capped at a week — "
+                        "a caller wanting a year should query the database, "
+                        "not stream it through JSON.",
+        )
+    ):
+        """Recent observed readings, oldest first."""
+        try:
+            return service.history(hours)
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/dashboard", tags=["service"], response_class=HTMLResponse,
+             include_in_schema=False)
+    def dashboard():
+        """A live view of the grid, drawn entirely from the endpoints above.
+
+        Excluded from the OpenAPI schema deliberately: it is a page for people,
+        not an endpoint for programs, and listing it beside the JSON routes
+        would suggest something machine-readable lives here.
+        """
+        from .dashboard import DASHBOARD_HTML
+
+        return HTMLResponse(DASHBOARD_HTML)
 
     return app
