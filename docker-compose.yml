@@ -1,0 +1,82 @@
+# gridcast in containers.
+#
+#   docker compose up -d api          serve forecasts on :8000
+#   docker compose run --rm update     fetch whatever is new
+#   docker compose run --rm train      retrain and save models
+#
+# The two named volumes are the whole design. `gridcast-data` holds the SQLite
+# database and `gridcast-models` holds the trained models, and both outlive any
+# container — so `update` and `train` write to exactly the storage the running
+# API reads from, and rebuilding the image loses neither.
+#
+# The one-shot services share the same image and volumes as the API and differ
+# only in their command. That is deliberate: a separate image for the ingest
+# job would be a second thing to build, a second thing to version, and a place
+# for the two to drift apart.
+
+services:
+  api:
+    build: .
+    image: gridcast:latest
+    container_name: gridcast-api
+    ports:
+      # Bound to localhost, not 0.0.0.0. On a machine with a public IP, "8000:8000"
+      # publishes this to the internet, past any host firewall — Docker writes
+      # its own iptables rules. Nothing here needs to be reachable from
+      # anywhere else, so it is not.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - gridcast-data:/data
+      - gridcast-models:/models
+    restart: unless-stopped
+
+  # Incremental ingest. Safe to run repeatedly — writes are idempotent, and the
+  # watermark means a second run in the same minute fetches nothing rather than
+  # duplicating anything.
+  #
+  # Under `profiles`, so `docker compose up` starts only the API. Without that,
+  # every `up` would kick off a fetch against EirGrid, which is exactly the
+  # habit their open data licence asks people not to form.
+  update:
+    build: .
+    image: gridcast:latest
+    profiles: ["tools"]
+    command: ["update", "--db", "/data/gridcast.db", "-v"]
+    volumes:
+      - gridcast-data:/data
+
+  # First load. Hours of work, resumable, and safe to interrupt.
+  backfill:
+    build: .
+    image: gridcast:latest
+    profiles: ["tools"]
+    command: ["backfill", "--days", "365", "--db", "/data/gridcast.db", "-v"]
+    volumes:
+      - gridcast-data:/data
+
+  # Retrain against whatever is now held, and write the models the API loads.
+  # The API does not notice new model files on its own — it loads once at
+  # startup, on purpose — so restart it afterwards:
+  #     docker compose restart api
+  train:
+    build: .
+    image: gridcast:latest
+    profiles: ["tools"]
+    command: ["train", "--horizons", "1", "3", "6", "12", "--save",
+              "--db", "/data/gridcast.db", "--model-dir", "/models"]
+    volumes:
+      - gridcast-data:/data
+      - gridcast-models:/models
+
+  # What is held, and how the recent runs went.
+  status:
+    build: .
+    image: gridcast:latest
+    profiles: ["tools"]
+    command: ["status", "--db", "/data/gridcast.db"]
+    volumes:
+      - gridcast-data:/data
+
+volumes:
+  gridcast-data:
+  gridcast-models:

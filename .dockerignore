@@ -1,0 +1,47 @@
+# Everything here is either large, secret-adjacent, or an artifact — and all of
+# it would otherwise be sent to the Docker daemon as build context on every
+# single build, whether or not the Dockerfile copies it.
+#
+# The database is the one that matters most. A year of readings is tens of
+# megabytes that would be shipped across on every build and, if COPYd, would
+# bake stale data into an immutable image. It belongs in a mounted volume.
+
+.git
+.gitignore
+.github
+
+# Virtual environments — a local .venv contains Linux-incompatible binaries on
+# some hosts and is never the right thing to copy in regardless.
+.venv
+venv
+env
+
+# Artifacts, not source.
+data/
+models/
+docs/
+*.db
+*.db-journal
+*.joblib
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# The test suite is not shipped in the runtime image. It runs in CI and on a
+# developer machine, where the dev extras exist.
+tests/
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+Dockerfile
+docker-compose.yml
+.dockerignore

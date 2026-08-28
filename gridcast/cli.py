@@ -106,9 +106,17 @@ def cmd_baseline(args) -> int:
     print(f"\nWind as a share of demand: mean {share.mean():.1f}%, "
           f"max {share.max():.1f}%")
     if "co2_intensity" in frame:
-        by_hour = frame.groupby(frame.index.hour)["co2_intensity"].mean()
-        print(f"Carbon intensity: dirtiest hour {by_hour.idxmax():02d}:00 "
-              f"({by_hour.max():.0f} gCO2/kWh), "
+        # Irish local time, matching the chart in `report`. Carbon intensity
+        # peaks because of when people cook dinner, and people cook dinner at a
+        # local clock time — through the summer a UTC hour label is an hour off
+        # the behaviour it describes. Two parts of one project answering the
+        # same question differently is worse than either answer alone.
+        from .config import GRID_TIMEZONE
+
+        local_hour = frame.index.tz_convert(GRID_TIMEZONE).hour
+        by_hour = frame.groupby(local_hour)["co2_intensity"].mean()
+        print(f"Carbon intensity (Irish local time): dirtiest hour "
+              f"{by_hour.idxmax():02d}:00 ({by_hour.max():.0f} gCO2/kWh), "
               f"cleanest {by_hour.idxmin():02d}:00 ({by_hour.min():.0f})")
 
     print("\nBaseline forecasts, by horizon")
