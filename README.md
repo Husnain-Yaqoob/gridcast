@@ -22,16 +22,16 @@ the horizons where it loses.
 
 ## Results
 
-A year of all-island data, 263,000+ readings, 99.99% complete. Models validated
+A year of all-island data, 267,000+ readings, 99.98% complete. Models validated
 by walk-forward cross-validation over five expanding folds, each scored against
 a persistence baseline measured on exactly the same rows.
 
 | Horizon | Model MAE | Persistence MAE | Skill |
 |---|---|---|---|
-| **1 hour** | **105.3 MW** | 120.8 MW | **+12.8%, in every fold** |
-| 3 hours | 269.6 MW | 285.8 MW | +5.7% |
-| 6 hours | 492.8 MW | 469.2 MW | −5.0% |
-| 12 hours | 788.4 MW | 698.2 MW | −12.9% |
+| **1 hour** | **105.6 MW** | 119.9 MW | **+12.0%, in every fold** |
+| 3 hours | 269.2 MW | 282.8 MW | +4.8%, not in every fold |
+| 6 hours | 492.9 MW | 462.4 MW | −6.6% |
+| 12 hours | 869.6 MW | 686.1 MW | −26.8% |
 
 **The model beats persistence at one hour and loses beyond three.** That shape
 is the finding, and it is reported rather than hidden.
@@ -43,7 +43,19 @@ reason, and no amount of feature engineering recovers information that was
 never collected. Meanwhile persistence has no parameters, so it cannot overfit,
 and its relative advantage grows with horizon.
 
-Permutation importance at one hour explains where the 12.8% comes from:
+**But the twelve-hour model is not merely worse — it is unstable.** Its five
+folds scored −6.9%, −0.3%, **−137.5%**, +2.8% and −34.6%. One stretch of
+weather in the third fold more than doubled its error against a baseline with
+no parameters at all. The headline −26.8% understates that: an average taken
+across a spread that wide is not a description of anything anyone could plan
+around.
+
+The one-hour model is the opposite. It won in every fold — +15.4%, +16.4%,
++5.7%, +10.1%, +6.5% — which is the difference between a result and a
+coincidence. The three-hour model sits between the two: ahead on average, but
+behind in one fold out of five, and reported that way.
+
+Permutation importance at one hour explains where the 12.0% comes from:
 
 ```
 wind_now      510.11  ########################################
@@ -62,8 +74,8 @@ knows which way output is *moving*. That is the entire edge.
 
 At one hour the orange line sits on the blue one. At twelve it wanders — and
 notice that it wanders *confidently*, holding a level the grid left hours ago.
-Both panels share a y-axis on purpose; a separate scale per panel would make a
-790 MW error look the same size as a 105 MW one.
+Both panels share a y-axis on purpose; a separate scale per panel would make an
+870 MW error look the same size as a 106 MW one.
 
 ![Skill against a persistence baseline, by forecast horizon](docs/skill_by_horizon.png)
 
@@ -76,13 +88,15 @@ against data it was trained on produces a beautiful chart that proves nothing.
 
 ### What the data itself says
 
-- **Wind covered 34.5% of Irish demand on average, and peaked at 98.6%** — there
+- **Wind covered 34.1% of Irish demand on average, and peaked at 98.6%** — there
   was a moment last year when wind was generating almost the whole country's
   electricity.
-- The grid is **dirtiest at 04:00** (199 gCO2/kWh) and **cleanest at 11:00**
-  (164). Counterintuitive until you notice that overnight demand collapses while
-  must-run thermal plant stays on, so its share of the mix rises even as total
-  emissions fall.
+- The grid is **dirtiest at 05:00** (202 gCO2/kWh) and **cleanest at 12:00**
+  (164), in Irish local time. Counterintuitive until you notice that overnight
+  demand collapses while must-run thermal plant stays on, so its share of the
+  mix rises even as total emissions fall. Measured in UTC the same profile
+  reads 04:00 and 11:00 — an hour out from the human behaviour causing it,
+  which is why the analysis converts.
 - A seasonal-naive forecast — *yesterday at this time* — is **worse than
   predicting the long-run mean**. Wind has essentially no daily cycle, which is
   the opposite of demand on the same grid.
@@ -172,6 +186,8 @@ a backfill rather than halfway through one.
 | `report` | Renders the charts above into `docs/` |
 | `serve` | Runs the forecast API and the live dashboard |
 
+The project also ships a `Dockerfile` and a `docker-compose.yml` — see [Docker](#docker).
+
 Add `-v` to watch each request.
 
 ### The API
@@ -200,9 +216,9 @@ documentation at `/docs`.
   "horizon_hours": 1.0,
   "predicted_wind_mw": 470.2,
   "current_wind_mw": 450.0,
-  "expected_error_mw": 105.3,
-  "persistence_error_mw": 120.8,
-  "skill_vs_persistence_pct": 12.8,
+  "expected_error_mw": 105.6,
+  "persistence_error_mw": 119.9,
+  "skill_vs_persistence_pct": 12.0,
   "attribution": "Supported by EirGrid Group Data"
 }
 ```
@@ -220,6 +236,70 @@ that publishes every fifteen minutes.
 
 **Windows** — Task Scheduler, hourly, running `python -m gridcast update` with
 the repository as the working directory.
+
+---
+
+## Docker
+
+```bash
+docker compose up -d api
+```
+
+Then `http://127.0.0.1:8000/dashboard`.
+
+A fresh stack has no data and no models, so the first run of the API will tell
+you so and stop. Fill it first:
+
+```bash
+docker compose run --rm backfill     # hours, resumable, safe to interrupt
+docker compose run --rm train        # writes the models the API loads
+docker compose up -d api
+```
+
+| Command | What it does |
+|---|---|
+| `docker compose up -d api` | Serves the API and dashboard on `127.0.0.1:8000` |
+| `docker compose run --rm update` | Fetches whatever is new |
+| `docker compose run --rm backfill` | First load of a year of history |
+| `docker compose run --rm train` | Retrains and saves the models |
+| `docker compose run --rm status` | What is held, and how recent runs went |
+
+The API loads its models once at startup, deliberately, so after `train` it
+needs `docker compose restart api` before it serves the new ones.
+
+Four decisions in there are worth the sentence each.
+
+**The database and the models are volumes, never image layers.** Both are
+artifacts rather than source. Baking a year of readings into an immutable image
+gives every container a private copy of data that is stale the following day,
+and grows the image every time the data does. `gridcast-data` and
+`gridcast-models` outlive any container, so the ingest job writes to exactly
+the storage the API reads from.
+
+**`--host 0.0.0.0`, and this one catches people out.** The CLI defaults to
+`127.0.0.1`, which is right on a laptop and useless in a container: it binds
+the container's own loopback, so the published port connects to nothing and a
+perfectly healthy service looks broken.
+
+**The port is published to `127.0.0.1`, not to everything.** `"8000:8000"`
+would expose this to the internet on any machine with a public IP, past the
+host firewall — Docker writes its own iptables rules and does not consult it.
+
+**Only `api` starts by default.** The ingest services sit behind a compose
+profile so that `docker compose up` cannot quietly fire a fetch at EirGrid on
+every restart. Their open data licence asks people not to form that habit.
+
+The image installs the `serve` extra rather than `analysis`: the service loads
+models and answers requests, and never draws a chart, so matplotlib and its
+font and image libraries stay out of it. Charts are rendered by
+`gridcast report` on a developer machine.
+
+None of the tests build an image — that needs a daemon, and a suite that only
+passes on machines with one is a suite people stop running. What they do check
+is drift: every command in `docker-compose.yml` is parsed by the real CLI
+parser, and every service that writes to a path is checked to have a volume
+behind it. A container that runs, reports rows written, exits zero and loses
+the database is the failure that looks like success.
 
 ---
 
@@ -527,7 +607,7 @@ gridcast/
 │   ├── model.py      training, validation, saving, forecasting
 │   ├── api.py        FastAPI service
 │   └── cli.py        command line
-├── tests/            113 tests, no network access required
+├── tests/            149 tests, no network access required
 └── data/             the database lives here (gitignored)
 ```
 
@@ -544,9 +624,18 @@ python -m pytest
 ## Roadmap
 
 - [x] Ingestion, storage, scheduling, run logging (chunk-by-chunk commits, resumable)
-- [ ] Feature engineering — lags, rolling means, ramp rates, hour and season
-- [ ] Persistence baseline, evaluated with walk-forward validation
-- [ ] Forecast models at +1h, +3h and +6h, reported against that baseline
-- [ ] FastAPI service exposing predictions
-- [ ] Dashboard: wind share of demand, carbon intensity by hour, forecast vs actual
-- [ ] Docker
+- [x] Feature engineering — lags, rolling means, ramp rates, hour and season
+- [x] Persistence baseline, evaluated with walk-forward validation
+- [x] Forecast models at +1h, +3h, +6h and +12h, reported against that baseline
+- [x] FastAPI service exposing predictions
+- [x] Dashboard: wind share of demand, carbon intensity by hour, forecast vs actual
+- [x] Docker
+
+Not built, and worth being explicit about why:
+
+- **Numerical weather prediction as an input.** The six- and twelve-hour models
+  fail for want of information this dataset does not contain. That is a data
+  problem, not a modelling one, and no amount of feature engineering recovers
+  it.
+- **Prediction intervals** rather than a single number carrying a validated
+  MAE.
