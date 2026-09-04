@@ -345,3 +345,23 @@ def test_the_dashboard_labels_a_lagging_tile(tmp_path):
 
     assert "lagging_by_minutes" in DASHBOARD_HTML
     assert "behind" in DASHBOARD_HTML
+
+
+def test_dashboard_and_cli_agree_on_what_stale_means():
+    """One threshold, defined once.
+
+    The dashboard hardcoded 120 minutes while `gridcast status` used six
+    hours, so the same database could show a red "the hourly ingest may have
+    stopped" banner and a clean bill of health on the command line at the same
+    moment. Two hours was also too tight for this pipeline — the job runs
+    hourly and EirGrid settles about half an hour late, so one missed run was
+    enough to raise the alarm during normal operation.
+    """
+    from gridcast.config import STALE_AFTER_HOURS
+    from gridcast.dashboard import DASHBOARD_HTML
+
+    assert f"ageMinutes > {STALE_AFTER_HOURS * 60}" in DASHBOARD_HTML
+    assert "STALE_AFTER_MINUTES" not in DASHBOARD_HTML, (
+        "the placeholder was not substituted; the page would throw a "
+        "ReferenceError and render nothing"
+    )

@@ -21,7 +21,7 @@ The page never invents a number. Where the API has no answer, the tile says so.
 
 from __future__ import annotations
 
-DASHBOARD_HTML = r"""<!doctype html>
+_DASHBOARD_TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -79,8 +79,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   .tile .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .tile .lag { text-transform: none; letter-spacing: 0; font-size: 11px;
                margin-left: 6px; padding: 1px 5px; border-radius: 3px;
-               background: var(--grid); color: var(--muted); }
-  .tile .value { font-size: 26px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
+               background: var(--grid); color: var(--muted);
+               white-space: nowrap; display: inline-block; }
+  .tile .value { font-size: 26px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em;
+                 white-space: nowrap; }
   .tile .unit { font-size: 14px; font-weight: 500; color: var(--ink-2); }
   h2 { font-size: 16px; margin: 0 0 2px; }
   .note { color: var(--ink-2); font-size: 13px; margin: 0 0 14px; }
@@ -168,7 +170,7 @@ function tiles(latest) {
   const items = [
     ["Wind now", F(latest.wind_mw), "MW", ""],
     ["Demand", F(latest.demand_mw), "MW", ""],
-    ["Wind share", F(latest.wind_share_pct, 1), "% of demand", ""],
+    ["Wind share", F(latest.wind_share_pct, 1), "%", ""],
     ["Carbon intensity", F(latest.co2_intensity), "gCO₂/kWh", behind("co2_intensity")],
     ["SNSP", F(latest.snsp, 1), "%", behind("snsp")],
   ];
@@ -361,7 +363,11 @@ async function load() {
 
     const observed = new Date(latest.observed_at_utc);
     const ageMinutes = Math.round((Date.now() - observed.getTime()) / 60000);
-    const stale = ageMinutes > 120;
+    // Matches STALE_AFTER_HOURS in config.py — see the note where the constant
+    // is defined. The two are substituted in below rather than written twice,
+    // because a dashboard and a CLI disagreeing about whether the same data is
+    // stale is worse than either threshold being slightly wrong.
+    const stale = ageMinutes > STALE_AFTER_MINUTES;
     const age = ageMinutes < 120 ? `${ageMinutes} min ago`
       : ageMinutes < 2880 ? `${Math.round(ageMinutes / 60)} hours ago`
       : `${Math.round(ageMinutes / 1440)} days ago`;
@@ -384,3 +390,18 @@ setInterval(load, 5 * 60 * 1000);
 </body>
 </html>
 """
+
+
+# The freshness threshold is defined once, in config, and substituted here.
+#
+# It was hardcoded at 120 minutes while `gridcast status` used six hours, so
+# the same database could be "stale" on the dashboard and healthy on the
+# command line at the same moment. Two hours is also too tight for this
+# pipeline: the scheduled job runs hourly and EirGrid settles a period about
+# half an hour after it ends, so a single missed run was enough to put a red
+# warning on the page during normal operation.
+from .config import STALE_AFTER_HOURS   # noqa: E402
+
+DASHBOARD_HTML = _DASHBOARD_TEMPLATE.replace(
+    "STALE_AFTER_MINUTES", str(STALE_AFTER_HOURS * 60)
+)
