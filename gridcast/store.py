@@ -268,7 +268,22 @@ class Store:
         )
 
     def coverage(self) -> Sequence[sqlite3.Row]:
-        """One row per series: how much is held, how much of it is real."""
+        """One row per series: how much is held, how much of it is real.
+
+        `last_ts` is the newest row of any kind, `real_last_ts` the newest row
+        that actually carries a value. Both are reported because the gap
+        between them is the interesting number.
+
+        An earlier version returned only `last_ts`, and that was a real bug
+        rather than a cosmetic one. EirGrid publishes placeholder rows ahead of
+        settlement, so a series that has stopped updating keeps growing a tail
+        of empty rows and reports a *later* `last_ts` than a healthy series
+        that has none. In one observed case wind had stalled fourteen hours
+        earlier than SNSP and displayed as four hours fresher — the ranking was
+        not merely wrong, it was inverted, which is the worst way for a health
+        display to fail. `latest_timestamp` below has always filtered nulls for
+        exactly this reason; this query now agrees with it.
+        """
         with self._connect() as connection:
             return connection.execute(
                 """
@@ -276,7 +291,9 @@ class Store:
                        COUNT(*)                                   AS rows_held,
                        SUM(CASE WHEN value IS NULL THEN 1 ELSE 0 END) AS nulls,
                        MIN(ts_utc)                                AS first_ts,
-                       MAX(ts_utc)                                AS last_ts
+                       MAX(ts_utc)                                AS last_ts,
+                       MAX(CASE WHEN value IS NOT NULL THEN ts_utc END)
+                                                                  AS real_last_ts
                   FROM reading
                  GROUP BY area, region
                  ORDER BY area, region

@@ -12,11 +12,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from . import ingest
 from .client import GridClient
-from .config import (ATTRIBUTION, AREAS, DEFAULT_DB_PATH, DEFAULT_REGION,
+from .config import (ABANDONED_RUN_AFTER_HOURS, ATTRIBUTION, AREAS,
+                     DEFAULT_DB_PATH, DEFAULT_REGION, STALE_AFTER_HOURS,
                      MAX_DAYS_PER_REQUEST, REQUEST_INTERVAL_SECONDS, REGIONS)
 from .store import Store
 
@@ -291,13 +292,33 @@ def cmd_serve(args) -> int:
                               region=args.region)
     app = create_app(service)
 
-    if not service.available_horizons:
-        print("No trained models found. Train some first:\n"
-              "    python -m gridcast train --save", file=sys.stderr)
-        return 1
-
-    print(f"Models loaded for horizons: "
-          f"{', '.join(f'{h:g}h' for h in service.available_horizons)}")
+    if service.available_horizons:
+        print(f"Models loaded for horizons: "
+              f"{', '.join(f'{h:g}h' for h in service.available_horizons)}")
+    else:
+        # Start anyway. This used to exit 1, which was wrong in the one place
+        # it mattered most: under `restart: unless-stopped` the container exits,
+        # Docker restarts it, and it exits again — a crash loop that begins on
+        # the very first `docker compose up`, before anything has been trained.
+        #
+        # Worse, the documented way out is `docker compose run --rm train`,
+        # which needs the same volumes the looping container is fighting over,
+        # so the failure actively obstructs its own fix.
+        #
+        # An API with no models is not a broken service, it is an unready one.
+        # /health already says "degraded" and names the empty horizon list, the
+        # dashboard already explains itself, and /forecast already answers 404
+        # for a horizon it holds no model for. Readiness belongs to the caller —
+        # which is what the Dockerfile's healthcheck comment claims, and is now
+        # actually true.
+        print("No trained models found — starting in a degraded state.",
+              file=sys.stderr)
+        print("  /health reports 'degraded'; /forecast answers 404 until a "
+              "model exists.", file=sys.stderr)
+        print("  Train, then restart:\n"
+              "      python -m gridcast train --save\n"
+              "      docker compose run --rm train && docker compose restart api\n",
+              file=sys.stderr)
     print(f"Live dashboard:   http://{args.host}:{args.port}/dashboard")
     print(f"Interactive docs: http://{args.host}:{args.port}/docs\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
@@ -309,10 +330,22 @@ def _print_runs(store: Store, limit: int = 5) -> None:
     if not runs:
         return
     print("Recent runs:")
+    now = datetime.now(timezone.utc)
     for run in runs:
-        state = run["status"] or "running"
+        state = run["status"]
+        if not state:
+            # No recorded outcome. Either it is genuinely in flight, or the
+            # process was killed before finish_run — a slept laptop, a closed
+            # terminal — and the row will now say "running" forever. Age is the
+            # only thing that separates the two.
+            started = datetime.strptime(
+                run["started_at"][:19] + "Z", "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+            hours = (now - started).total_seconds() / 3600
+            state = ("abandoned" if hours > ABANDONED_RUN_AFTER_HOURS
+                     else "running")
         print(f"  #{run['id']:<4} {run['started_at'][:16]}  {run['command']:<28} "
-              f"{state:<8} {run['rows_written'] or 0:>7,} rows")
+              f"{state:<9} {run['rows_written'] or 0:>7,} rows")
         if run["detail"]:
             print(f"        {run['detail'][:100]}")
 
@@ -331,17 +364,48 @@ def cmd_status(args) -> int:
         print("\nIf there are no runs above, start with 'probe' then 'backfill'.")
         return 0
 
+    # "to" is the newest row carrying an actual value, not the newest row of
+    # any kind. See Store.coverage for why reporting the latter is worse than
+    # reporting nothing. "age" makes the same fact legible at a glance: a
+    # series that has quietly stopped updating shows a growing number here
+    # while every other column still looks healthy.
+    now = datetime.now(timezone.utc)
     print(f"{'series':<16} {'region':<7} {'rows':>8} {'null':>7} "
-          f"{'from':<17} {'to':<17}")
-    print("-" * 78)
-    for row in rows:
-        print(f"{row['area']:<16} {row['region']:<7} {row['rows_held']:>8,} "
-              f"{row['nulls']:>7,} {row['first_ts'][:16]:<17} {row['last_ts'][:16]:<17}")
+          f"{'from':<17} {'to (real data)':<17} {'age':>7}")
+    print("-" * 87)
 
-    print(f"\nTotal: {store.count():,} readings\n")
+    stale = []
+    for row in rows:
+        real = row["real_last_ts"]
+        if real:
+            hours = (now - datetime.strptime(
+                real, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            ).total_seconds() / 3600
+            age, shown = f"{hours:.0f}h", real[:16]
+            if hours > STALE_AFTER_HOURS:
+                stale.append((row["area"], row["region"], hours))
+        else:
+            age, shown = "never", "-"
+            stale.append((row["area"], row["region"], None))
+
+        print(f"{row['area']:<16} {row['region']:<7} {row['rows_held']:>8,} "
+              f"{row['nulls']:>7,} {row['first_ts'][:16]:<17} {shown:<17} "
+              f"{age:>7}")
+
+    print(f"\nTotal: {store.count():,} readings")
+
+    if stale:
+        print(f"\nStale (no real reading in {STALE_AFTER_HOURS}h):")
+        for area, region, hours in stale:
+            behind = "no data at all" if hours is None else f"{hours:.0f}h behind"
+            print(f"  {area} [{region}] — {behind}")
+        print("  A partial run leaves some series current and others stranded.")
+        print("  Check the run log below, then re-run 'update'.")
+
+    print()
     _print_runs(store)
     print(f"\n{ATTRIBUTION}")
-    return 0
+    return 1 if stale else 0
 
 
 # Shared flag defaults, applied after parsing rather than by argparse itself.

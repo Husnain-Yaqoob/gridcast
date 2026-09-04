@@ -126,3 +126,46 @@ def test_coverage_reports_nulls(store):
     assert len(rows) == 1
     assert rows[0]["rows_held"] == 2
     assert rows[0]["nulls"] == 1
+
+
+def test_coverage_separates_held_rows_from_real_data(store):
+    """`last_ts` counts placeholders; `real_last_ts` must not.
+
+    This is the bug that made a stalled series look healthier than a working
+    one. EirGrid keeps publishing empty rows ahead of settlement, so the series
+    that stopped receiving values grows the longest tail of nulls and reports
+    the newest `last_ts` of anything in the database.
+    """
+    store.upsert([
+        reading(9, value=100.0),
+        reading(10, value=None),
+        reading(11, value=None),
+    ])
+    row = store.coverage()[0]
+    assert row["last_ts"].startswith("2026-01-15T11:00")
+    assert row["real_last_ts"].startswith("2026-01-15T09:00")
+
+
+def test_a_stalled_series_does_not_outrank_a_healthy_one(store):
+    """The inversion itself, written down as a test.
+
+    Observed in production: wind had received nothing for fourteen hours and
+    displayed as four hours fresher than SNSP, which was current. Ordering by
+    `last_ts` reproduces that. Ordering by `real_last_ts` does not.
+    """
+    store.upsert([
+        # Healthy: current to 12:00, no placeholder tail.
+        reading(12, value=500.0, area="snsp"),
+        # Stalled: real data stopped at 09:00, placeholders run on to 18:00.
+        reading(9, value=100.0, area="wind"),
+        reading(18, value=None, area="wind"),
+    ])
+    by_area = {r["area"]: r for r in store.coverage()}
+
+    assert by_area["wind"]["last_ts"] > by_area["snsp"]["last_ts"]
+    assert by_area["wind"]["real_last_ts"] < by_area["snsp"]["real_last_ts"]
+
+
+def test_real_last_ts_is_null_when_a_series_holds_only_placeholders(store):
+    store.upsert([reading(9, value=None), reading(10, value=None)])
+    assert store.coverage()[0]["real_last_ts"] is None

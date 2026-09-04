@@ -1,7 +1,7 @@
 {
   "horizon_hours": 3,
-  "trained_at": "2026-08-23T22:37:44Z",
-  "training_rows": 35106,
+  "trained_at": "2026-09-03T20:36:23Z",
+  "training_rows": 36154,
   "features": [
     "wind_now",
     "wind_lag1",
@@ -42,66 +42,66 @@
   "attribution": "Supported by EirGrid Group Data",
   "validation": {
     "method": "walk-forward, 5 expanding folds",
-    "model_mae": 269.57,
-    "model_rmse": 349.98,
-    "persistence_mae": 285.79,
-    "skill_vs_persistence_pct": 5.68,
+    "model_mae": 270.1,
+    "model_rmse": 346.43,
+    "persistence_mae": 280.14,
+    "skill_vs_persistence_pct": 3.58,
     "beat_baseline_in_every_fold": false,
     "folds": [
       {
         "fold": 1,
-        "train_rows": 14042,
-        "test_rows": 4212,
-        "test_start": "2026-01-16 09:30:00+00:00",
-        "test_end": "2026-03-01 06:15:00+00:00",
-        "model_mae": 351.20431956436903,
-        "model_rmse": 448.22234435454965,
-        "baseline_mae": 380.07288698955364,
-        "baseline_rmse": 500.2048386204368
+        "train_rows": 14461,
+        "test_rows": 4338,
+        "test_start": "2026-01-20 18:15:00+00:00",
+        "test_end": "2026-03-06 22:30:00+00:00",
+        "model_mae": 341.89506566410626,
+        "model_rmse": 445.7282010381835,
+        "baseline_mae": 392.21922544951593,
+        "baseline_rmse": 514.6864593636423
       },
       {
         "fold": 2,
-        "train_rows": 18254,
-        "test_rows": 4212,
-        "test_start": "2026-03-01 06:30:00+00:00",
-        "test_end": "2026-04-14 03:15:00+00:00",
-        "model_mae": 344.84233947980204,
-        "model_rmse": 446.7220971445035,
-        "baseline_mae": 392.1880341880342,
-        "baseline_rmse": 523.5635152595348
+        "train_rows": 18799,
+        "test_rows": 4338,
+        "test_start": "2026-03-06 22:45:00+00:00",
+        "test_end": "2026-04-21 03:00:00+00:00",
+        "model_mae": 341.40165970395924,
+        "model_rmse": 435.4811343358821,
+        "baseline_mae": 364.05555555555554,
+        "baseline_rmse": 490.4286123747972
       },
       {
         "fold": 3,
-        "train_rows": 22466,
-        "test_rows": 4212,
-        "test_start": "2026-04-14 03:30:00+00:00",
-        "test_end": "2026-05-28 00:15:00+00:00",
-        "model_mae": 239.46067148078163,
-        "model_rmse": 306.0007046423314,
-        "baseline_mae": 218.42141500474833,
-        "baseline_rmse": 304.5008256951085
+        "train_rows": 23137,
+        "test_rows": 4338,
+        "test_start": "2026-04-21 03:15:00+00:00",
+        "test_end": "2026-06-05 07:30:00+00:00",
+        "model_mae": 237.97161859178632,
+        "model_rmse": 304.86851285778283,
+        "baseline_mae": 232.93199631166436,
+        "baseline_rmse": 323.68992079225893
       },
       {
         "fold": 4,
-        "train_rows": 26678,
-        "test_rows": 4212,
-        "test_start": "2026-05-28 00:30:00+00:00",
-        "test_end": "2026-07-10 21:15:00+00:00",
-        "model_mae": 224.6315518032949,
-        "model_rmse": 299.68496526599915,
-        "baseline_mae": 247.89767331433998,
-        "baseline_rmse": 343.0439681077059
+        "train_rows": 27475,
+        "test_rows": 4338,
+        "test_start": "2026-06-05 07:45:00+00:00",
+        "test_end": "2026-07-20 12:00:00+00:00",
+        "model_mae": 241.41074486265185,
+        "model_rmse": 296.22866878468017,
+        "baseline_mae": 217.65998155832182,
+        "baseline_rmse": 304.8377543508013
       },
       {
         "fold": 5,
-        "train_rows": 30890,
-        "test_rows": 4216,
-        "test_start": "2026-07-10 21:30:00+00:00",
-        "test_end": "2026-08-23 19:15:00+00:00",
-        "model_mae": 187.78559831854315,
-        "model_rmse": 249.34973162401798,
-        "baseline_mae": 190.47746679316887,
-        "baseline_rmse": 260.4111517948629
+        "train_rows": 31813,
+        "test_rows": 4341,
+        "test_start": "2026-07-20 12:15:00+00:00",
+        "test_end": "2026-09-03 17:15:00+00:00",
+        "model_mae": 187.87962527605583,
+        "model_rmse": 249.90050292795112,
+        "baseline_mae": 193.86961529601476,
+        "baseline_rmse": 264.90061246652806
       }
     ]
   }

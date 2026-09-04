@@ -117,4 +117,20 @@ USER_AGENT = (
 # it travels with the data rather than living only in the README.
 ATTRIBUTION = "Supported by EirGrid Group Data"
 
+# How far behind a series may fall before `status` calls it stale.
+#
+# The floor is set by how the data arrives, not by preference. EirGrid settles
+# a period roughly half an hour after it ends, and the scheduled job runs
+# hourly, so a healthy series sits between about one and two hours behind. Six
+# hours therefore survives a settlement delay and several consecutive missed
+# runs without crying wolf, while still catching the case this exists for: one
+# series failing its fetch while the others succeed, which leaves the database
+# looking busy and the forecast quietly running on stale inputs.
+STALE_AFTER_HOURS = 6
+
+# A run that started this long ago and never recorded an outcome did not
+# finish. Nothing holds a lock — `start_run` is a bare INSERT — so an abandoned
+# row blocks no future work; it just should not keep claiming to be running.
+ABANDONED_RUN_AFTER_HOURS = 3
+
 DEFAULT_DB_PATH = "data/gridcast.db"

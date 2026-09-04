@@ -77,6 +77,9 @@ DASHBOARD_HTML = r"""<!doctype html>
   .tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
   .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .tile .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tile .lag { text-transform: none; letter-spacing: 0; font-size: 11px;
+               margin-left: 6px; padding: 1px 5px; border-radius: 3px;
+               background: var(--grid); color: var(--muted); }
   .tile .value { font-size: 26px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
   .tile .unit { font-size: 14px; font-weight: 500; color: var(--ink-2); }
   h2 { font-size: 16px; margin: 0 0 2px; }
@@ -150,15 +153,27 @@ function el(tag, attrs = {}, text) {
 }
 
 function tiles(latest) {
+  // Carbon intensity and SNSP settle later than wind and demand, so their
+  // newest value can be an hour or two behind the headline reading. Showing
+  // the number is right; showing it as though it were from the same instant
+  // is not. The lag is labelled on the tile that has one.
+  const lag = latest.lagging_by_minutes || {};
+  const behind = (key) => {
+    const mins = lag[key];
+    if (!mins) return "";
+    const text = mins < 90 ? `${mins}m` : `${Math.round(mins / 60)}h`;
+    return `<span class="lag" title="This series settles later than wind and demand">${text} behind</span>`;
+  };
+
   const items = [
-    ["Wind now", F(latest.wind_mw), "MW"],
-    ["Demand", F(latest.demand_mw), "MW"],
-    ["Wind share", F(latest.wind_share_pct, 1), "% of demand"],
-    ["Carbon intensity", F(latest.co2_intensity), "gCO₂/kWh"],
-    ["SNSP", F(latest.snsp, 1), "%"],
+    ["Wind now", F(latest.wind_mw), "MW", ""],
+    ["Demand", F(latest.demand_mw), "MW", ""],
+    ["Wind share", F(latest.wind_share_pct, 1), "% of demand", ""],
+    ["Carbon intensity", F(latest.co2_intensity), "gCO₂/kWh", behind("co2_intensity")],
+    ["SNSP", F(latest.snsp, 1), "%", behind("snsp")],
   ];
-  document.getElementById("tiles").innerHTML = items.map(([label, value, unit]) =>
-    `<div class="tile"><div class="label">${label}</div>
+  document.getElementById("tiles").innerHTML = items.map(([label, value, unit, note]) =>
+    `<div class="tile"><div class="label">${label}${note}</div>
      <div class="value">${value} <span class="unit">${unit}</span></div></div>`
   ).join("");
 }

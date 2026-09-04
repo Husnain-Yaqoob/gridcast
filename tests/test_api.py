@@ -267,3 +267,81 @@ def test_horizons_reports_the_baseline_it_is_measured_against(client):
     entry = client.get("/horizons").json()["horizons"][0]
     assert entry["persistence_error_mw"] > 0
     assert entry["beat_baseline_in_every_fold"] in (True, False)
+
+
+# ------------------------------------------------- supplementary series lag
+#
+# The dashboard's carbon tile rendered an em dash against a database holding a
+# year of carbon readings. `latest()` anchors on the newest row carrying wind
+# and demand, and carbon settles later than both, so it was being read at a
+# timestamp it had not reached — a bug that looks exactly like missing data.
+
+def _service_with_lagging_carbon(tmp_path, carbon_hours_behind):
+    """Wind and demand current; carbon last seen N hours earlier."""
+    db_path = str(tmp_path / "lag.db")
+    store = Store(db_path)
+    base = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+
+    readings = []
+    for step in range(96):
+        stamp = base + timedelta(minutes=15 * step)
+        readings.append(Reading(area="wind", region="ALL",
+                                timestamp_utc=stamp, value=1000.0 + step))
+        readings.append(Reading(area="demand", region="ALL",
+                                timestamp_utc=stamp, value=4000.0))
+        # Carbon stops early, then publishes empty placeholders like the real
+        # upstream does.
+        latest_carbon = 96 - 1 - int(carbon_hours_behind * 4)
+        readings.append(Reading(
+            area="co2_intensity", region="ALL", timestamp_utc=stamp,
+            value=300.0 if step <= latest_carbon else None,
+        ))
+    store.upsert(readings)
+    return ForecastService(db_path=db_path, model_dir=str(tmp_path / "none"))
+
+
+def test_carbon_is_reported_from_its_own_newest_reading(tmp_path):
+    service = _service_with_lagging_carbon(tmp_path, carbon_hours_behind=2)
+    body = service.latest()
+
+    assert body["co2_intensity"] == 300.0, "carbon exists and must be reported"
+    assert body["lagging_by_minutes"]["co2_intensity"] == 120
+
+
+def test_a_current_series_is_not_reported_as_lagging(tmp_path):
+    service = _service_with_lagging_carbon(tmp_path, carbon_hours_behind=0)
+    body = service.latest()
+
+    assert body["co2_intensity"] == 300.0
+    assert "lagging_by_minutes" not in body, (
+        "nothing lags, so the response should carry no caveat"
+    )
+
+
+def test_a_long_dead_series_is_dropped_rather_than_shown_as_current(tmp_path):
+    """Falling back is not the same as falling back forever.
+
+    A carbon reading from two days ago displayed beside a live wind figure
+    would be worse than an empty tile, because it looks current.
+    """
+    service = _service_with_lagging_carbon(tmp_path, carbon_hours_behind=20)
+    body = service.latest()
+
+    assert "co2_intensity" not in body
+    assert body["wind_mw"] is not None, "the rest of the payload still works"
+
+
+def test_lag_is_exposed_through_the_endpoint(tmp_path):
+    service = _service_with_lagging_carbon(tmp_path, carbon_hours_behind=3)
+    response = TestClient(create_app(service)).get("/latest")
+
+    assert response.status_code == 200
+    assert response.json()["lagging_by_minutes"] == {"co2_intensity": 180}
+
+
+def test_the_dashboard_labels_a_lagging_tile(tmp_path):
+    """A number shown without its age is the thing this fix was avoiding."""
+    from gridcast.dashboard import DASHBOARD_HTML
+
+    assert "lagging_by_minutes" in DASHBOARD_HTML
+    assert "behind" in DASHBOARD_HTML

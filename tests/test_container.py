@@ -205,3 +205,37 @@ def test_dockerignore_excludes_the_database(dockerfile):
         ignored = handle.read()
     for pattern in ("data/", "models/", ".venv", "*.db"):
         assert pattern in ignored
+
+
+# ------------------------------------------------- restart policy vs. startup
+def test_serve_starts_without_models_because_the_api_is_restarted_forever():
+    """A service under `restart: unless-stopped` must not exit on an empty state.
+
+    The first `docker compose up` on a fresh checkout has no trained models.
+    An exit there is not a one-off failure: Docker restarts the container, it
+    exits again, and the loop only ends when a model appears. The documented
+    remedy — `docker compose run --rm train` — needs the same volumes, so the
+    failure obstructs its own fix.
+
+    Asserted against the source rather than a live container, because the whole
+    point of this file is that it runs on a machine with no Docker daemon.
+    """
+    import inspect
+
+    from gridcast import cli
+
+    source = inspect.getsource(cli.cmd_serve)
+    body = source.split("if service.available_horizons:")[1]
+    assert "return 1" not in body, (
+        "cmd_serve exits when no models are loaded; under the api service's "
+        "restart policy that is a crash loop, not a failure"
+    )
+
+
+def test_the_api_service_restarts_and_therefore_relies_on_that(compose):
+    """Ties the test above to the policy that makes it necessary.
+
+    If the restart policy is ever removed, the reasoning changes and this
+    should be re-examined rather than silently kept.
+    """
+    assert compose["services"]["api"].get("restart") == "unless-stopped"

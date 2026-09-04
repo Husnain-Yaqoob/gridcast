@@ -192,3 +192,74 @@ def test_render_all_skips_what_it_cannot_draw(frame, tmp_path, capsys):
     assert len(written) == 3
     assert "skipped skill by horizon" in capsys.readouterr().out
     assert all(os.path.exists(p) for p in written)
+
+
+# ------------------------------------------------- the two chart-honesty fixes
+#
+# The backtest panel is one 80/20 split over a few days; every headline figure
+# in the project is walk-forward across five folds. On real data these
+# disagreed by 38 points at twelve hours — the panel read "beats persistence by
+# 26.7%" while the skill chart beside it read "-11.0%". Both were correct
+# measurements of different things, and together they were a project
+# contradicting itself in public.
+
+from gridcast.report import _validated_skill   # noqa: E402
+
+
+def test_validated_skill_reads_the_shipped_manifest(tmp_path):
+    import json
+
+    (tmp_path / "wind_h12.json").write_text(json.dumps(
+        {"validation": {"skill_vs_persistence_pct": -11.03}}
+    ))
+    assert _validated_skill(12.0, str(tmp_path)) == pytest.approx(-11.03)
+
+
+def test_validated_skill_matches_the_manifest_naming(tmp_path):
+    """`%g` drops the trailing zero: horizon 1.0 is wind_h1, not wind_h1.0.
+
+    Getting this wrong returns None for every horizon and the caption silently
+    loses half its meaning, with no error anywhere.
+    """
+    import json
+
+    (tmp_path / "wind_h1.json").write_text(json.dumps(
+        {"validation": {"skill_vs_persistence_pct": 12.1}}
+    ))
+    assert _validated_skill(1.0, str(tmp_path)) == pytest.approx(12.1)
+
+    # And the file the chart looks for is the file the trainer writes.
+    assert f"wind_h{1.0:g}.json" == "wind_h1.json"
+
+
+def test_validated_skill_is_none_when_there_is_no_manifest(tmp_path):
+    """No model yet is not an error — the caption just omits the comparison."""
+    assert _validated_skill(6.0, str(tmp_path)) is None
+
+
+def test_validated_skill_survives_a_corrupt_manifest(tmp_path):
+    (tmp_path / "wind_h6.json").write_text("{not json")
+    assert _validated_skill(6.0, str(tmp_path)) is None
+
+
+def test_validated_skill_is_none_when_validation_is_absent(tmp_path):
+    import json
+
+    (tmp_path / "wind_h6.json").write_text(json.dumps({"trained_rows": 100}))
+    assert _validated_skill(6.0, str(tmp_path)) is None
+
+
+def test_carbon_subtitle_does_not_assert_a_peak_the_data_may_not_show():
+    """The subtitle claimed an evening peak; the chart annotated 05:00.
+
+    The annotation is computed from the data and the subtitle was typed once,
+    so the subtitle is the half that goes stale. It now explains why the axis
+    is in local time, which stays true, and leaves the shape to the annotation.
+    """
+    import inspect
+
+    from gridcast import report
+
+    source = inspect.getsource(report.carbon_by_hour_chart)
+    assert "evening peak" not in source
+    assert "Irish local time" in source

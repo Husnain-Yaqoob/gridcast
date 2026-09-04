@@ -25,7 +25,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .config import ATTRIBUTION, DEFAULT_DB_PATH, DEFAULT_REGION
+from .config import ATTRIBUTION, STALE_AFTER_HOURS, DEFAULT_DB_PATH, DEFAULT_REGION
 
 # How long a loaded frame is trusted before it is re-read. The source publishes
 # every fifteen minutes and the scheduled update runs hourly, so five minutes
@@ -186,16 +186,47 @@ class ForecastService:
         row = recent.iloc[-1]
         share = 100.0 * float(row["wind"]) / float(row["demand"]) if row["demand"] else None
 
+        observed_at = recent.index[-1]
         payload = {
-            "observed_at_utc": recent.index[-1].strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "observed_at_utc": observed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "wind_mw": round(float(row["wind"]), 1),
             "demand_mw": round(float(row["demand"]), 1),
             "wind_share_pct": round(share, 1) if share is not None else None,
             "attribution": ATTRIBUTION,
         }
+
+        # The supplementary series settle later than wind and demand.
+        #
+        # This anchors on the newest row holding wind *and* demand, which is
+        # usually newer than carbon intensity has reached. Reading carbon off
+        # that row therefore found NaN and dropped the field, and the dashboard
+        # tile rendered an em dash — not because the value was missing, but
+        # because it was asked for at a timestamp it had not got to yet. A
+        # blank tile beside a database holding a year of carbon readings is a
+        # bug that looks like an absence of data.
+        #
+        # So fall back to the most recent value each series actually has,
+        # bounded by the same staleness limit `gridcast status` uses. Beyond
+        # that the number is not worth showing, and the tile stays empty
+        # honestly rather than displaying yesterday as though it were now.
+        ages = {}
+        cutoff = observed_at - pd.Timedelta(hours=STALE_AFTER_HOURS)
         for column in ("snsp", "co2_intensity", "interconnection"):
-            if column in frame.columns and not pd.isna(row.get(column)):
-                payload[column] = round(float(row[column]), 1)
+            if column not in frame.columns:
+                continue
+            series = frame[column].dropna()
+            series = series[series.index <= observed_at]
+            if series.empty or series.index[-1] < cutoff:
+                continue
+            payload[column] = round(float(series.iloc[-1]), 1)
+            behind = (observed_at - series.index[-1]).total_seconds() / 60.0
+            if behind > 0:
+                ages[column] = round(behind)
+
+        # Only sent when something actually lags, so the common case stays a
+        # clean response and the dashboard has nothing to caveat.
+        if ages:
+            payload["lagging_by_minutes"] = ages
         return payload
 
 
@@ -279,6 +310,13 @@ def _response_models():
         co2_intensity: float | None = Field(default=None, description="gCO2/kWh")
         interconnection: float | None = Field(
             default=None, description="Net interconnector flow, MW. Positive is import."
+        )
+        lagging_by_minutes: dict[str, int] | None = Field(
+            default=None,
+            description="For any supplementary series whose newest value is "
+                        "older than observed_at_utc, how far behind it is. "
+                        "These settle later than wind and demand; the field is "
+                        "absent when everything is current.",
         )
         attribution: str
         model_config = {"json_schema_extra": {"example": {

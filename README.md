@@ -21,52 +21,148 @@ the horizons where it loses.
 ---
 
 ## Results
+A year of all-island data, 270,000+ readings. Models validated by walk-forward
+cross-validation over five expanding folds, each scored against a persistence
+baseline measured on exactly the same rows.
 
-A year of all-island data, 267,000+ readings, 99.98% complete. Models validated
-by walk-forward cross-validation over five expanding folds, each scored against
-a persistence baseline measured on exactly the same rows.
+Completeness is reported by `gridcast status` rather than quoted here, because
+it moves: the upstream dashboard returns 503 under load, and every refused
+window leaves a gap until a later run fills it. A fixed number in a README is
+the one that will be wrong.
 
 | Horizon | Model MAE | Persistence MAE | Skill |
 |---|---|---|---|
-| **1 hour** | **105.6 MW** | 119.9 MW | **+12.0%, in every fold** |
-| 3 hours | 269.2 MW | 282.8 MW | +4.8%, not in every fold |
-| 6 hours | 492.9 MW | 462.4 MW | −6.6% |
-| 12 hours | 869.6 MW | 686.1 MW | −26.8% |
+| **1 hour** | **104.4 MW** | 118.8 MW | **+12.1%, in every fold** |
+| 3 hours | 270.1 MW | 280.1 MW | +3.6% |
+| 6 hours | 497.2 MW | 458.2 MW | −8.5% |
+| 12 hours | 752.9 MW | 678.1 MW | −11.0% (unstable — see below) |
 
 **The model beats persistence at one hour and loses beyond three.** That shape
 is the finding, and it is reported rather than hidden.
 
-Two reasons for it. Past a few hours, wind output is determined by weather this
-dataset does not contain — a front arriving, a pressure gradient shifting.
-Operational forecasters feed numerical weather prediction in for exactly that
-reason, and no amount of feature engineering recovers information that was
-never collected. Meanwhile persistence has no parameters, so it cannot overfit,
-and its relative advantage grows with horizon.
+### Why it loses, and it is not the horizon
 
-**But the twelve-hour model is not merely worse — it is unstable.** Its five
-folds scored −6.9%, −0.3%, **−137.5%**, +2.8% and −34.6%. One stretch of
-weather in the third fold more than doubled its error against a baseline with
-no parameters at all. The headline −26.8% understates that: an average taken
-across a spread that wide is not a description of anything anyone could plan
-around.
+The obvious reading is that twelve hours is simply too far. The folds say
+something more specific. Here is the six-hour horizon with each test window
+mapped onto the calendar:
 
-The one-hour model is the opposite. It won in every fold — +15.4%, +16.4%,
-+5.7%, +10.1%, +6.5% — which is the difference between a result and a
-coincidence. The three-hour model sits between the two: ahead on average, but
-behind in one fold out of five, and reported that way.
+| Fold | Test window | Persistence MAE | Skill |
+|---|---|---|---|
+| 1 | 20 Jan – 06 Mar 2026 | 668.7 MW | +2.6% |
+| 2 | 06 Mar – 20 Apr 2026 | 600.3 MW | −6.3% |
+| 3 | 20 Apr – 05 Jun 2026 | 377.6 MW | −18.1% |
+| 4 | 05 Jun – 20 Jul 2026 | 345.8 MW | −31.4% |
+| 5 | 20 Jul – 03 Sep 2026 | 299.0 MW | **+1.0%** |
 
-Permutation importance at one hour explains where the 12.0% comes from:
+Persistence error falls steadily from winter into summer — 669 MW down to
+299 MW — and the model's skill collapses in step with it. The model is not
+getting worse. Persistence is getting better. Calm summer wind barely moves
+between one reading and the next, so "assume nothing changes" becomes very
+hard to beat, while a model trained mostly on volatile autumn and winter data
+keeps predicting winter-sized swings and moves away from the right answer.
+
+Fold 5 is the test of that explanation. It is still summer, but its training
+set is the first to contain a summer — June and July 2026, which were fold 4's
+test window. Skill recovers from −31.4% to +1.0% at six hours, and from −43.8%
+to −15.2% at twelve. Absolute model error in fold 5 is the lowest of all five
+folds. Given one summer to learn from, the model stops losing.
+
+Seasonal coverage is therefore part of the story. It is not the whole of it,
+and the next section is the part I got wrong first.
+
+### The twelve-hour number is not precise enough to quote
+
+An earlier run on eleven months of data contained a fold at −137.5%. When a
+full year of data produced folds no worse than −43.8%, the obvious conclusion
+was that more data had fixed it.
+
+It had not. Training the same code inside the container — on a database
+differing from the development one by about four days — produced a fold at
+−89.7%. The catastrophic fold had not been removed. It had moved.
+
+Three runs, same code, datasets within two weeks of each other:
+
+| Horizon | 11 months | 377 days | 365 days | spread |
+|---|---|---|---|---|
+| **1 hour** | +12.0% | +12.1% | +11.8% | **0.3 pts** |
+| 3 hours | +4.8% | +3.6% | +3.0% | 1.8 pts |
+| 6 hours | −6.6% | −8.5% | −7.8% | 1.9 pts |
+| **12 hours** | −26.8% | −11.0% | −20.5% | **15.8 pts** |
+
+Worst single fold at twelve hours, across the same three runs: −137.5%,
+−43.8%, −89.7%.
+
+The one-hour figure is the same number three times over. The twelve-hour
+figure moves by sixteen points depending on where five fold boundaries happen
+to land, and its worst fold varies by a factor of three.
+
+So skill degrades with horizon, and so does the *precision of the estimate of
+that skill*. At one hour "beats persistence by 12%" is a measurement. At twelve
+hours "loses by 11%" is a single draw from a wide distribution, and quoting it
+to one decimal place implies a confidence the data does not support. The
+headline table above reports it anyway, because the alternative is reporting
+nothing, but it should be read as "loses, somewhere in the region of ten to
+twenty-five per cent, on this sample" rather than as a number.
+
+The seasonal explanation above still holds — persistence error genuinely falls
+from 669 MW to 299 MW into summer in every run, and skill genuinely tracks it.
+What does not hold is the claim that a year of data settled the twelve-hour
+horizon. It did not, and the container caught it.
+
+The backtest chart below is the same instability from a third direction. It
+draws four volatile days from a single held-out split, and over those four days
+the twelve-hour model beats persistence by 22.5% — against a validated −11.0%.
+Both are correct measurements of different things, which is why the chart now
+prints them side by side. Re-rendering it a few hours later moved the window
+figure by four points and left the validated figure where it was
+
+
+### What a year of data cannot fix
+
+Past a few hours, wind output is determined by weather this dataset does not
+contain — a front arriving, a pressure gradient shifting. Operational
+forecasters feed numerical weather prediction in for exactly that reason, and
+no amount of feature engineering recovers information that was never
+collected. Persistence, meanwhile, has no parameters, so it cannot overfit, and
+its relative advantage grows with horizon.
+
+Permutation importance at one hour explains where the 12.1% comes from:
 
 ```
-wind_now      510.11  ########################################
-wind_ramp4      8.46  #
-wind_lag12      2.32
-wind_lag24      2.32
-wind_ramp1      2.05
+wind_now         571.84  ########################################
+wind_ramp4         8.85  #
+wind_lag24         3.09
+interconnection    2.30
+wind_lag12         2.21
 ```
 
-Only two features matter. Persistence knows the current *level*; the model also
-knows which way output is *moving*. That is the entire edge.
+Only two features matter, and one of them by a factor of sixty-five.
+Persistence knows the current *level*; the model also knows which way output is
+*moving*. That is the entire edge.
+
+Run the same measurement at six hours and the shape falls apart:
+
+```
+wind_now         213.87  ########################################
+wind_ramp4        30.88  #####
+co2_intensity     17.76  ###
+wind_lag24        15.07  ##
+snsp               7.89  #
+wind_share         6.99  #
+doy_cos            6.39  #
+```
+
+`wind_now` loses nearly two thirds of its weight, `wind_ramp4` gains three and
+a half times its own, and a long tail of context appears — carbon intensity,
+yesterday's value at this hour, system non-synchronous penetration, and
+`doy_cos`, which is day-of-year seasonality.
+
+This is the same finding as the fold table, seen from the other side. At one
+hour the model needs the present and nothing else. At six it has run out of
+present and reaches for seasonal and system context instead — context it
+learned almost entirely from autumn and winter. It is not failing at six hours
+for want of signal. It is failing because the signal it leans on was measured
+in the wrong season.
 
 ### The finding, drawn
 

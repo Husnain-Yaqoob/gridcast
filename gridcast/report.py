@@ -244,13 +244,29 @@ def carbon_by_hour_chart(frame: pd.DataFrame,
     _style(
         ax,
         "Carbon intensity of Irish electricity, by hour of day",
-        "Median with interquartile range. Hours are Irish local time — the "
-        "evening peak is a human habit, not a UTC one.",
+        "Median with interquartile range. Hours are Irish local time, not "
+        "UTC — demand follows the clock people actually live by.",
         "gCO₂ per kWh",
     )
     ax.set_xticks(range(0, 24, 2))
     ax.set_xlabel("hour of day (Europe/Dublin)", color="#52514e", fontsize=10)
     return _finish(fig, path)
+
+
+def _validated_skill(horizon: float, model_dir: str) -> float | None:
+    """The walk-forward skill recorded in the model's manifest, if it exists.
+
+    Read from disk rather than recomputed so the chart cannot quietly disagree
+    with the number the model actually shipped with.
+    """
+    path = os.path.join(model_dir, f"wind_h{horizon:g}.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    value = manifest.get("validation", {}).get("skill_vs_persistence_pct")
+    return float(value) if value is not None else None
 
 
 def forecast_vs_actual_chart(
@@ -259,6 +275,7 @@ def forecast_vs_actual_chart(
     horizons: tuple[float, ...] = (1.0, 12.0),
     days: int = 4,
     params: dict | None = None,
+    model_dir: str = "models",
 ) -> str:
     """The finding, drawn: short horizons track, long horizons drift.
 
@@ -292,11 +309,28 @@ def forecast_vs_actual_chart(
 
         verdict = "beats persistence" if skill > 0 else "loses to persistence"
         unit = "hour" if horizon == 1 else "hours"
+
+        # State the validated figure next to the window figure, always.
+        #
+        # This panel is one 80/20 split shown over four days. The headline
+        # number everywhere else in the project is walk-forward across five
+        # folds. They can disagree violently — at twelve hours this window
+        # showed +26.7% while validation showed -11.0% — because four days of
+        # volatile wind is exactly the condition persistence handles worst.
+        #
+        # A chart that printed only the flattering one, beside a skill chart
+        # printing only the other, would be two project outputs contradicting
+        # each other in public. Showing both turns that into the point.
+        validated = _validated_skill(horizon, model_dir)
+        caption = (f"MAE {model_mae:.0f} MW vs persistence {naive_mae:.0f} MW "
+                   f"— {verdict} by {abs(skill):.1f}% in this window")
+        if validated is not None:
+            caption += f"; walk-forward validation says {validated:+.1f}%"
+
         _style(
             ax,
             f"{horizon:g} {unit} ahead",
-            f"MAE {model_mae:.0f} MW vs persistence {naive_mae:.0f} MW — "
-            f"{verdict} by {abs(skill):.1f}%",
+            caption,
             "wind generation (MW)",
         )
 
@@ -316,8 +350,8 @@ def forecast_vs_actual_chart(
 
     fig.autofmt_xdate()
     fig.suptitle(
-        f"Forecast against what actually happened — last {days} days of a "
-        f"held-out test period",
+        f"Forecast against what actually happened — last {days} days of one "
+        f"held-out split",
         color=INK, fontsize=14, fontweight="bold", x=0.005, ha="left", y=1.02,
     )
     return _finish(fig, path)
@@ -415,7 +449,7 @@ def render_all(frame: pd.DataFrame, output_dir: str = DEFAULT_OUTPUT_DIR,
             frame, os.path.join(output_dir, "carbon_by_hour.png"))),
         ("forecast vs actual", lambda: forecast_vs_actual_chart(
             frame, os.path.join(output_dir, "forecast_vs_actual.png"),
-            days=days, params=params)),
+            days=days, params=params, model_dir=model_dir)),
         ("skill by horizon", lambda: skill_by_horizon_chart(
             model_dir, os.path.join(output_dir, "skill_by_horizon.png"))),
     ]
